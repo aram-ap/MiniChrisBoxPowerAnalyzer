@@ -2,6 +2,11 @@
 
 A PyQt6-based application for analyzing and visualizing power data collected from multiple devices (designed around the Mini Chris Box, built for the NASA RockSatX 2025 mission). It features a professional, multi-panel interface that allows users to view and analyze voltage, current, power, and energy consumption data and possesses the ability to export analysis results in various formats.
 
+> ### Full Device Power View
+> ![All Devices View](images/allpower.png)
+> ### GSE-1 Device Power View (TE-1, TE-2, TE-3, TE-R not shown)
+> ![GSE-1 View](images/gse1power.png)
+
 ## Features
 
 - **Multi-Output Support**: Analyze data from GSE-1, GSE-2, TE-1, TE-2, TE-3, and TE-R devices
