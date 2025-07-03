@@ -6,6 +6,7 @@ from datetime import datetime
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 import numpy as np
+import re  # Added for regex operations
 
 # Optional imports for Excel export
 try:
@@ -50,6 +51,11 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
         self.curves = {}
         self.field_checkboxes = {}
         self.current_tab_index = 0
+
+        # NEW: Store script information and corruption data
+        self.script_info = {}
+        self.corrupted_indices = []
+        self.original_data_points_count = 0
 
         # Settings
         self.settings = QtCore.QSettings("PowerDataAnalyzer", "PowerDataAnalyzer")
@@ -192,16 +198,10 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
             tab_action.triggered.connect(lambda checked, idx=i + 1: self.plotTabWidget.setCurrentIndex(idx))
             view_menu.addAction(tab_action)
 
-        # Summary tab shortcut
-        # summary_action = QtGui.QAction('Switch to Summary', self)
-        # summary_action.setShortcut('Ctrl+A')
-        # summary_action.triggered.connect(lambda: self.show_summary_in_side_panel())
-        # view_menu.addAction(summary_action)
-
         # All tab shortcut
         all_tab_action = QtGui.QAction('Switch to All', self)
         all_tab_action.setShortcut('0')
-        all_tab_action.setShortcuts(('0','A'))
+        all_tab_action.setShortcuts(('0', 'A'))
         all_tab_action.triggered.connect(lambda: self.plotTabWidget.setCurrentIndex(0))
         view_menu.addAction(all_tab_action)
 
@@ -374,9 +374,34 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
             if not os.access(file_path, os.R_OK):
                 raise PermissionError(f"Cannot read file: {file_path}")
 
-            # Load JSON data
+            # FIXED: Better JSON loading with corruption detection
             with open(file_path, "r", encoding='utf-8') as f:
-                self.data_json = json.load(f)
+                file_content = f.read()
+
+            # Check for basic JSON corruption patterns
+            if self.detect_json_corruption(file_content):
+                # Try to fix simple JSON corruption
+                file_content = self.attempt_json_repair(file_content)
+
+            try:
+                self.data_json = json.loads(file_content)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON format: {str(e)}")
+
+            # NEW: Extract script information
+            self.extract_script_info(self.data_json)
+
+            # NEW: Validate and check for corruption
+            corruption_info = self.validate_and_check_corruption(self.data_json)
+
+            if corruption_info['has_corruption']:
+                # Show corruption dialog and offer to fix
+                if self.show_corruption_dialog(corruption_info):
+                    # User chose to fix - clean the data and save back
+                    self.fix_corrupted_data(file_path, corruption_info)
+                else:
+                    # User chose not to fix - continue with corrupted data
+                    pass
 
             # Validate JSON structure
             if not self.validate_json_structure(self.data_json):
@@ -397,7 +422,10 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
             # Update side panel
             self.update_side_panel_for_current_tab()
 
-            self.statusBar().showMessage(f"Loaded {os.path.basename(file_path)} successfully")
+            status_msg = f"Loaded {os.path.basename(file_path)} successfully"
+            if self.corrupted_indices:
+                status_msg += f" ({len(self.corrupted_indices)} corrupted points found)"
+            self.statusBar().showMessage(status_msg)
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(
@@ -406,6 +434,231 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
                 f"Failed to load file: {file_path}\n\nError: {str(e)}"
             )
             self.statusBar().showMessage("Failed to load file")
+
+    def detect_json_corruption(self, content):
+        """Detect common JSON corruption patterns"""
+        # Check for incomplete JSON (missing closing braces/brackets)
+        if content.count('{') != content.count('}'):
+            return True
+        if content.count('[') != content.count(']'):
+            return True
+
+        # Check for trailing commas or incomplete data sections
+        if re.search(r',\s*[}\]]', content):
+            return True
+
+        # Check for incomplete data array
+        data_start = content.find('"data":[')
+        if data_start != -1:
+            after_data_start = content[data_start:]
+            # FIXED: Corrected regex pattern with proper parentheses
+            if re.search(r'[,{]\s*$', after_data_start.rstrip().rstrip('}')):
+                return True
+
+        return False
+
+    def attempt_json_repair(self, content):
+        """Attempt to repair common JSON corruption issues"""
+        # Remove trailing commas
+        content = re.sub(r',(\s*[}\]])', r'\1', content)
+
+        # Fix incomplete data array - ensure proper closing
+        if '"data":[' in content and not content.rstrip().endswith(']}'):
+            # Find the last complete data entry
+            last_brace = content.rfind('}')
+            if last_brace != -1:
+                # Ensure proper closing of data array and main object
+                content = content[:last_brace + 1] + '\n],\n"duration_sec": 0\n}'
+
+        return content
+
+    def extract_script_info(self, data):
+        """Extract script information from JSON data"""
+        self.script_info = {}
+
+        if isinstance(data, dict):
+            # Extract basic script info
+            self.script_info['using_script'] = data.get('using_script', 0)
+            self.script_info['timestamp'] = data.get('timestamp', 'Unknown')
+            self.script_info['duration_sec'] = data.get('duration_sec', 0)
+
+            # Extract script configuration if available
+            script_config = data.get('script_config', {})
+            if script_config:
+                self.script_info['script_name'] = script_config.get('name', 'Unknown')
+                self.script_info['t_start'] = script_config.get('tstart', 0)
+                self.script_info['t_end'] = script_config.get('tend', 0)
+                self.script_info['auto_record'] = script_config.get('record', False)
+            else:
+                self.script_info['script_name'] = 'No script used'
+                self.script_info['t_start'] = 0
+                self.script_info['t_end'] = 0
+                self.script_info['auto_record'] = False
+
+    def validate_and_check_corruption(self, data):
+        """Validate data and check for corruption"""
+        corruption_info = {
+            'has_corruption': False,
+            'corrupted_indices': [],
+            'total_points': 0,
+            'corruption_details': []
+        }
+
+        if not isinstance(data, dict) or 'data' not in data:
+            return corruption_info
+
+        data_points = data['data']
+        if not isinstance(data_points, list):
+            return corruption_info
+
+        corruption_info['total_points'] = len(data_points)
+        self.original_data_points_count = len(data_points)
+        corrupted_indices = []
+        corruption_details = []
+
+        for i, point in enumerate(data_points):
+            if not isinstance(point, dict):
+                corrupted_indices.append(i)
+                corruption_details.append(f"Point {i}: Not a valid object")
+                continue
+
+            # Check for required fields
+            if 'time' not in point:
+                corrupted_indices.append(i)
+                corruption_details.append(f"Point {i}: Missing 'time' field")
+                continue
+
+            # Check for invalid time values
+            try:
+                time_val = float(point['time'])
+                if time_val < 0 or not np.isfinite(time_val):
+                    corrupted_indices.append(i)
+                    corruption_details.append(f"Point {i}: Invalid time value: {time_val}")
+                    continue
+            except (ValueError, TypeError):
+                corrupted_indices.append(i)
+                corruption_details.append(f"Point {i}: Time field is not numeric")
+                continue
+
+            # Check device data fields for corruption
+            for device in DEVICES:
+                for data_type in DATA_TYPES:
+                    field_key = f"{device}_{data_type}"
+                    if field_key in point:
+                        try:
+                            val = float(point[field_key])
+                            if not np.isfinite(val):
+                                corrupted_indices.append(i)
+                                corruption_details.append(f"Point {i}: Invalid {field_key} value: {val}")
+                                break
+                        except (ValueError, TypeError):
+                            corrupted_indices.append(i)
+                            corruption_details.append(f"Point {i}: {field_key} field is not numeric")
+                            break
+                else:
+                    continue
+                break
+
+        # Remove duplicates while preserving order
+        corrupted_indices = list(dict.fromkeys(corrupted_indices))
+
+        if corrupted_indices:
+            corruption_info['has_corruption'] = True
+            corruption_info['corrupted_indices'] = corrupted_indices
+            corruption_info['corruption_details'] = corruption_details[:10]  # Limit to first 10 for display
+
+        self.corrupted_indices = corrupted_indices
+        return corruption_info
+
+    def show_corruption_dialog(self, corruption_info):
+        """Show dialog asking user if they want to fix corrupted data"""
+        num_corrupted = len(corruption_info['corrupted_indices'])
+        total_points = corruption_info['total_points']
+
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setWindowTitle("Data Corruption Detected")
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+
+        text = f"""Data corruption detected in the file:
+
+• Total data points: {total_points:,}
+• Corrupted data points: {num_corrupted:,} ({num_corrupted / total_points * 100:.1f}%)
+
+Corruption details (first 10):"""
+
+        for detail in corruption_info['corruption_details']:
+            text += f"\n• {detail}"
+
+        if len(corruption_info['corruption_details']) < len(corruption_info['corrupted_indices']):
+            remaining = len(corruption_info['corrupted_indices']) - len(corruption_info['corruption_details'])
+            text += f"\n• ... and {remaining} more corrupted points"
+
+        text += f"""
+
+Would you like to:
+• Fix the file by removing corrupted data points and save the cleaned data back to the original file?
+• Or continue with the corrupted data (not recommended)?"""
+
+        dialog.setText(text)
+        dialog.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+        dialog.button(QtWidgets.QMessageBox.StandardButton.Yes).setText("Fix and Save")
+        dialog.button(QtWidgets.QMessageBox.StandardButton.No).setText("Continue with Corrupted Data")
+
+        result = dialog.exec()
+        return result == QtWidgets.QMessageBox.StandardButton.Yes
+
+    def fix_corrupted_data(self, file_path, corruption_info):
+        """Fix corrupted data by removing bad points and save back to file"""
+        try:
+            # Create backup first
+            backup_path = file_path + ".backup"
+            import shutil
+            shutil.copy2(file_path, backup_path)
+
+            # Remove corrupted data points (in reverse order to maintain indices)
+            data_points = self.data_json['data']
+            for idx in reversed(corruption_info['corrupted_indices']):
+                if 0 <= idx < len(data_points):
+                    del data_points[idx]
+
+            # Update data count in JSON if duration_sec exists
+            if 'duration_sec' in self.data_json:
+                # Recalculate duration if we have time data
+                if data_points and len(data_points) > 1:
+                    start_time = data_points[0].get('time', 0)
+                    end_time = data_points[-1].get('time', 0)
+                    self.data_json['duration_sec'] = int((end_time - start_time) / 1000)
+
+            # Save the cleaned data back to the original file
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(self.data_json, f, indent=2)
+
+            # Show success message
+            num_removed = len(corruption_info['corrupted_indices'])
+            remaining_points = len(data_points)
+
+            QtWidgets.QMessageBox.information(
+                self,
+                "Data Fixed Successfully",
+                f"""Data corruption fixed successfully!
+
+• Removed {num_removed:,} corrupted data points
+• Remaining data points: {remaining_points:,}
+• Original file backed up as: {os.path.basename(backup_path)}
+• Cleaned data saved to original file
+
+The file has been automatically reloaded with the cleaned data."""
+            )
+
+            # Clear corruption info since it's now fixed
+            self.corrupted_indices = []
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Error Fixing Data",
+                f"Failed to fix corrupted data:\n{str(e)}"
+            )
 
     def validate_json_structure(self, data):
         """Validate the JSON data structure"""
@@ -475,8 +728,13 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
             info_text = f"""<b>Current File:</b><br>
 {file_name}<br>
 <b>Size:</b> {file_size_mb:.2f} MB<br>
-<b>Data Points:</b> {len(self.data_points):,}<br>
-<b>Duration:</b> {self.times[-1] - self.times[0]:.1f}s"""
+<b>Data Points:</b> {len(self.data_points):,}"""
+
+            # Add corruption info if applicable
+            if self.corrupted_indices:
+                info_text += f"<br><b>Corrupted:</b> {len(self.corrupted_indices):,}"
+
+            info_text += f"<br><b>Duration:</b> {self.times[-1] - self.times[0]:.1f}s"
 
             self.file_info_label.setText(info_text)
         else:
@@ -707,13 +965,33 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
             self.show_device_analysis_in_side_panel(device)
 
     def show_summary_in_side_panel(self):
-        """Show summary analysis in side panel"""
+        """Show summary analysis in side panel with script information"""
         analysis_data = self.get_full_device_analysis()
         if not analysis_data or "Summary" not in analysis_data:
             return
 
-        # Create summary table
-        summary_data = []
+        # NEW: Add script information section at the top
+        script_data = []
+        script_data.append(["=== SCRIPT INFORMATION ===", ""])
+        script_data.append(["Script Used", "Yes" if self.script_info.get('using_script', 0) else "No"])
+
+        if self.script_info.get('using_script', 0):
+            script_data.append(["Script Name", self.script_info.get('script_name', 'Unknown')])
+            script_data.append(["Start Time (T_START)", f"{self.script_info.get('t_start', 0)} seconds"])
+            script_data.append(["End Time (T_END)", f"{self.script_info.get('t_end', 0)} seconds"])
+            script_data.append(["Auto Recording", "Yes" if self.script_info.get('auto_record', False) else "No"])
+        else:
+            script_data.append(["Recording Type", "Manual Recording"])
+
+        script_data.append(["Recording Start", self.script_info.get('timestamp', 'Unknown')])
+        if self.script_info.get('duration_sec', 0) > 0:
+            duration = self.script_info.get('duration_sec', 0)
+            script_data.append(["Recording Duration", f"{duration} seconds ({duration / 60:.1f} minutes)"])
+        script_data.append(["", ""])  # Empty row for spacing
+
+        # Create summary table with script info + existing analysis
+        summary_data = script_data.copy()
+
         for category, category_data in analysis_data["Summary"].items():
             summary_data.append([f"=== {category} ===", ""])
             if isinstance(category_data, dict):
@@ -754,7 +1032,13 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
 
         for i, row in enumerate(data):
             for j, cell in enumerate(row):
-                table.setItem(i, j, QtWidgets.QTableWidgetItem(str(cell)))
+                item = QtWidgets.QTableWidgetItem(str(cell))
+                # Make section headers bold
+                if str(cell).startswith("===") and str(cell).endswith("==="):
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                table.setItem(i, j, item)
 
         table.resizeColumnsToContents()
         self.sidePanelLayout.addWidget(table)
@@ -848,11 +1132,23 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
                 max_power_device = max(device_keys, key=lambda d: data[d]["Max Power (W)"])
                 max_energy_device = max(device_keys, key=lambda d: data[d]["Energy Consumed (Wh)"])
 
+                # Find max instantaneous current and power
+                max_total_current = 0.0
+                max_total_power = 0.0
+                for dev in device_keys:
+                    curr_key = f"{dev}_curr"
+                    pow_key = f"{dev}_pow"
+                    if curr_key in self.channels:
+                        max_total_current = max(max_total_current, np.max(self.channels[curr_key]))
+                    if pow_key in self.channels:
+                        max_total_power = max(max_total_power, np.max(self.channels[pow_key]))
+
                 data["Summary"] = {
                     "Analysis Info": {
                         "Total Devices Analyzed": len(device_keys),
                         "Total Channels": len(self.all_fields) + 1,  # +1 for time
                         "Total Data Points": len(self.times) * len(device_keys),
+                        "Corrupted Points": len(self.corrupted_indices) if self.corrupted_indices else 0,
                         "Analysis Duration (s)": round(time_duration_seconds, 2),
                         "Analysis Duration (min)": round(time_duration_seconds / 60.0, 2),
                         "Average Polling Rate (Hz)": round(len(self.times) / time_duration_seconds,
@@ -865,12 +1161,14 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
                     },
                     "System Current": {
                         "Maximum (A)": round(np.max(all_max_currents), 3),
+                        "Maximum Total Current (A)": round(max_total_current, 3),
                         "Average Maximum (A)": round(np.mean(all_max_currents), 3),
                         "Total Average (A)": round(np.sum(all_avg_currents), 3),
                         "Device with Max Current": data[max_current_device]["Device"]
                     },
                     "System Power": {
                         "Maximum (W)": round(np.max(all_max_powers), 3),
+                        "Maximum Total Power (W)": round(max_total_power, 3),
                         "Average Maximum (W)": round(np.mean(all_max_powers), 3),
                         "Total Average (W)": round(np.sum(all_avg_powers), 3),
                         "Device with Max Power": data[max_power_device]["Device"]
@@ -1013,6 +1311,23 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
                     f.write(f"Source File: {os.path.basename(self.current_file_path)}\n")
                 f.write("\n")
 
+                # NEW: Script information section
+                f.write("SCRIPT INFORMATION\n")
+                f.write("=" * 30 + "\n")
+                f.write(f"Script Used: {'Yes' if self.script_info.get('using_script', 0) else 'No'}\n")
+                if self.script_info.get('using_script', 0):
+                    f.write(f"Script Name: {self.script_info.get('script_name', 'Unknown')}\n")
+                    f.write(f"Start Time (T_START): {self.script_info.get('t_start', 0)} seconds\n")
+                    f.write(f"End Time (T_END): {self.script_info.get('t_end', 0)} seconds\n")
+                    f.write(f"Auto Recording: {'Yes' if self.script_info.get('auto_record', False) else 'No'}\n")
+                else:
+                    f.write("Recording Type: Manual Recording\n")
+                f.write(f"Recording Start: {self.script_info.get('timestamp', 'Unknown')}\n")
+                if self.script_info.get('duration_sec', 0) > 0:
+                    duration = self.script_info.get('duration_sec', 0)
+                    f.write(f"Recording Duration: {duration} seconds ({duration / 60:.1f} minutes)\n")
+                f.write("\n")
+
                 # Device data
                 for device_key, data in analysis_data.items():
                     if device_key == "Summary":
@@ -1057,7 +1372,23 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
                 writer = csv.writer(f)
 
                 # Header
-                writer.writerow(["Device", "Parameter", "Value"])
+                writer.writerow(["Category", "Parameter", "Value"])
+
+                # NEW: Script information
+                writer.writerow(["SCRIPT", "Script Used", "Yes" if self.script_info.get('using_script', 0) else "No"])
+                if self.script_info.get('using_script', 0):
+                    writer.writerow(["SCRIPT", "Script Name", self.script_info.get('script_name', 'Unknown')])
+                    writer.writerow(["SCRIPT", "Start Time (T_START)", f"{self.script_info.get('t_start', 0)} seconds"])
+                    writer.writerow(["SCRIPT", "End Time (T_END)", f"{self.script_info.get('t_end', 0)} seconds"])
+                    writer.writerow(
+                        ["SCRIPT", "Auto Recording", "Yes" if self.script_info.get('auto_record', False) else "No"])
+                else:
+                    writer.writerow(["SCRIPT", "Recording Type", "Manual Recording"])
+                writer.writerow(["SCRIPT", "Recording Start", self.script_info.get('timestamp', 'Unknown')])
+                if self.script_info.get('duration_sec', 0) > 0:
+                    duration = self.script_info.get('duration_sec', 0)
+                    writer.writerow(
+                        ["SCRIPT", "Recording Duration", f"{duration} seconds ({duration / 60:.1f} minutes)"])
 
                 # Device data
                 for device_key, data in analysis_data.items():
@@ -1092,6 +1423,31 @@ class PowerDataAnalyzer(QtWidgets.QMainWindow):
         """Export analysis data to Excel file"""
         try:
             with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+                # NEW: Script information sheet
+                script_data = []
+                script_data.append(
+                    {"Parameter": "Script Used", "Value": "Yes" if self.script_info.get('using_script', 0) else "No"})
+                if self.script_info.get('using_script', 0):
+                    script_data.append(
+                        {"Parameter": "Script Name", "Value": self.script_info.get('script_name', 'Unknown')})
+                    script_data.append(
+                        {"Parameter": "Start Time (T_START)", "Value": f"{self.script_info.get('t_start', 0)} seconds"})
+                    script_data.append(
+                        {"Parameter": "End Time (T_END)", "Value": f"{self.script_info.get('t_end', 0)} seconds"})
+                    script_data.append({"Parameter": "Auto Recording",
+                                        "Value": "Yes" if self.script_info.get('auto_record', False) else "No"})
+                else:
+                    script_data.append({"Parameter": "Recording Type", "Value": "Manual Recording"})
+                script_data.append(
+                    {"Parameter": "Recording Start", "Value": self.script_info.get('timestamp', 'Unknown')})
+                if self.script_info.get('duration_sec', 0) > 0:
+                    duration = self.script_info.get('duration_sec', 0)
+                    script_data.append({"Parameter": "Recording Duration",
+                                        "Value": f"{duration} seconds ({duration / 60:.1f} minutes)"})
+
+                df_script = pd.DataFrame(script_data)
+                df_script.to_excel(writer, sheet_name="Script Info", index=False)
+
                 # Device sheets
                 for device_key, data in analysis_data.items():
                     if device_key == "Summary":
@@ -1165,7 +1521,7 @@ def main():
     """Main application entry point"""
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Power Data Analyzer")
-    app.setApplicationVersion("2.0")
+    app.setApplicationVersion("2.1")
     app.setOrganizationName("PowerDataAnalyzer")
 
     # Set application icon if available

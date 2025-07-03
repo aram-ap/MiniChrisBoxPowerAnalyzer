@@ -193,6 +193,12 @@ The application validates JSON files for:
 4. **Keyboard Navigation**: Use keyboard shortcuts for faster navigation between devices
 5. **Side Panel**: Keep the analysis panel open to monitor real-time statistics while browsing data
 
+    ## TODO:
+    - [ ] Add support for real-time data streaming
+    - [ ] Implement advanced filtering options
+    - [X] Add automated timed events
+    - [ ] Add telemetry input support
+
 ## Troubleshooting
 
 ### Common Issues
