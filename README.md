@@ -1,247 +1,376 @@
-# Power Data Multi-Panel Viewer
+# Teensy 4.1 Power Controller - Network Interface
 
-A PyQt6-based application for analyzing and visualizing power data collected from multiple devices (designed around the Mini Chris Box, built for the NASA RockSatX 2025 mission). It features a professional, multi-panel interface that allows users to view and analyze voltage, current, power, and energy consumption data and possesses the ability to export analysis results in various formats.
+A comprehensive PyQt6-based application for real-time monitoring, control, and analysis of power data from Teensy 4.1 Power Controller systems. Originally designed for the NASA RockSatX 2025 mission, this application provides both live data streaming and historical data analysis capabilities with professional multi-panel interface supporting TCP/UDP/Serial communication protocols.
 
-> ### Full Device Power View
-> ![All Devices View](images/allpower.png)
-> ### GSE-1 Device Power View (TE-1, TE-2, TE-3, TE-R not shown)
-> ![GSE-1 View](images/gse1power.png)
+> ### Real-Time Live Data Streaming (All Devices View)
+> ![Live Streaming All Devices](images/live_streaming_all.png)
+> ### Individual Device Control & Analysis
+> ![Device Control Interface](images/device_control.png)
+> ### Connection Management & Quick Controls
+> ![Connection Panel](images/connection_panel.png)
 
-## Features
+## 🚀 Key Features
 
-- **Multi-Output Support**: Analyze data from GSE-1, GSE-2, TE-1, TE-2, TE-3, and TE-R devices
-- **Tabbed Interface**: Switch between device-specific views and combined "All" view
-- **Comprehensive Analytics**: Voltage, current, power, and energy consumption analysis
-- **Export Capabilities**: Save analysis results to Text, CSV, or Excel formats
-- **Recent Files**: Quick access to recently opened data files
-- **Professional UI**: Clean, intuitive interface with customizable panels
+### Real-Time Operations
+- **✅ Live Data Streaming**: Real-time monitoring at up to 20 FPS with smooth, non-flickering updates
+- **✅ Device Control**: Individual and master control of GSE-1, GSE-2, TE-R, TE-1, TE-2, TE-3 outputs
+- **✅ System Management**: Lock/unlock system, safety stop controls, fan speed adjustment
+- **✅ Script Execution**: Load, start, pause, and stop automated scripts on the Teensy
+- **✅ Multi-Protocol Support**: TCP, UDP, and USB Serial communication
 
-## Installation
+### Data Analysis & Visualization
+- **✅ Multi-Device Support**: Simultaneous monitoring of 6 power channels
+- **✅ Smooth Plotting**: Eliminated flickering with 50ms update intervals and incremental data updates
+- **✅ Window Modes**: Growing window and sliding time window (configurable duration)
+- **✅ Interactive Crosshairs**: Precise value inspection with color-coded device identification
+- **✅ Comprehensive Analytics**: Real-time voltage, current, power, and energy consumption analysis
 
-### Requirements
+### Professional Interface
+- **✅ Dual-Mode Operation**: Switch between Live Data and File Analysis modes
+- **✅ Tabbed Interface**: Device-specific views and combined "All" view with legends
+- **✅ Settings System**: Comprehensive configuration for polling rates, display options, and data handling
+- **✅ Debug Console**: Real-time command monitoring and JSON command interface
+- **✅ Export Capabilities**: Text, CSV, and Excel export for both live and historical data
 
-- Python 3.7 or higher
-- PyQt6
-- pyqtgraph
-- numpy
+## 📋 Installation
 
-### Optional Dependencies (for Excel export)
-- pandas
-- openpyxl
+### System Requirements
+- **Python**: 3.8 or higher
+- **Operating System**: Windows, macOS, or Linux
+- **Memory**: 8GB RAM recommended for smooth real-time operation
+- **Network**: Ethernet or WiFi for TCP/UDP communication (optional)
 
-### Install Dependencies
+### Required Dependencies
 
 ```bash
-# Required dependencies
+# Core dependencies
 pip install PyQt6 pyqtgraph numpy
 
-# Optional dependencies for Excel export
-pip install pandas openpyxl
+# Serial communication (for USB connection)
+pip install pyserial
+
+# Optional dependencies for enhanced features
+pip install pandas openpyxl  # Excel export support
+pip install OpenGL-accelerate  # Hardware acceleration (optional)
 ```
 
-## Usage
+### Quick Install (All Dependencies)
+
+```bash
+pip install PyQt6 pyqtgraph numpy pyserial pandas openpyxl
+```
+
+## 🖥️ Usage
 
 ### Starting the Application
 
 ```bash
-python power_analyzer.py [optional_file.json]
+python main.py [optional_file.json]
 ```
 
-You can optionally specify a JSON file to load on startup.
+### Connection Setup
 
-### Supported Data Format
+1. **Select Connection Type**:
+   - **TCP**: Network connection (default port 8080)
+   - **UDP**: Stateless network connection (default port 8081)  
+   - **Serial**: USB connection (auto-detects available ports)
 
-The application expects JSON files with the following structure:
+2. **Configure Settings**:
+   - **IP Address**: Default 192.168.1.100 for network connections
+   - **Baud Rate**: Default 2,000,000 for serial connections
+   - **Polling Rate**: Configurable via Settings → Data tab
+
+3. **Connect & Stream**:
+   - Click **Connect** to establish communication
+   - Click **Start Stream** to begin real-time data monitoring
+   - Use **Quick Controls** for immediate device management
+
+## 📊 Data Formats
+
+### Live Data Format (JSON over TCP/UDP/Serial)
 
 ```json
 {
-  "data": [
+  "type": "live_data",
+  "timestamp": "14:30:25",
+  "devices": [
     {
-      "time": 1640995200000,
-      "GSE-1_volt": 12.5,
-      "GSE-1_curr": 2100,
-      "GSE-1_pow": 26.25,
-      "GSE-1_stat": 1,
-      "GSE-2_volt": 11.8,
-      "GSE-2_curr": 1900,
-      "GSE-2_pow": 22.42,
-      "GSE-2_stat": 1,
-      "TE-1_volt": 13.2,
-      "TE-1_curr": 2300,
-      "TE-1_pow": 30.36,
-      "TE-1_stat": 1,
-      "TE-2_volt": 12.1,
-      "TE-2_curr": 2000,
-      "TE-2_pow": 24.2,
-      "TE-2_stat": 1,
-      "TE-3_volt": 11.9,
-      "TE-3_curr": 1850,
-      "TE-3_pow": 22.02,
-      "TE-3_stat": 1,
-      "TE-R_volt": 12.8,
-      "TE-R_curr": 2150,
-      "TE-R_pow": 27.52,
-      "TE-R_stat": 1
+      "name": "gse1",
+      "state": true,
+      "voltage": 12.45,
+      "current": 0.245,
+      "power": 3.042
+    },
+    {
+      "name": "gse2", 
+      "state": false,
+      "voltage": 0.0,
+      "current": 0.0,
+      "power": 0.0
     }
   ]
 }
 ```
 
-**Important Notes:**
-- Time values should be in milliseconds (Unix timestamp)
-- Current values should be in milliamps (automatically converted to amps)
-- Device names follow the pattern: `GSE-1`, `GSE-2`, `TE-1`, `TE-2`, `TE-3`, `TE-R`
-- Data types: `volt` (voltage), `curr` (current), `pow` (power), `stat` (status)
+### Historical Data Format (JSON Files)
 
-## Interface Overview
+```json
+{
+  "timestamp": "2024-01-15T14:30:25",
+  "duration_sec": 1800,
+  "using_script": 1,
+  "script_config": {
+    "name": "mission_profile_1",
+    "tstart": 0,
+    "tend": 1800,
+    "record": true
+  },
+  "data": [
+    {
+      "time": 1640995200000,
+      "GSE-1_volt": 12.5,
+      "GSE-1_curr": 2.1,
+      "GSE-1_pow": 26.25,
+      "GSE-1_stat": 1.0,
+      "GSE-2_volt": 11.8,
+      "GSE-2_curr": 1.9,
+      "GSE-2_pow": 22.42,
+      "GSE-2_stat": 0.0
+    }
+  ]
+}
+```
 
-### Main Interface
+## 🎛️ Interface Overview
 
-1. **Left Panel**: File information and data type selection (Voltage, Current, Power, Status)
-2. **Center Panel**: Tabbed plot area with device-specific and combined views
-3. **Right Panel**: Analysis data (toggleable, default open)
+### Connection Panel (Top)
+- **Connection Type**: TCP/UDP/Serial selection with settings
+- **Status Indicator**: Visual connection status with controls
+- **Quick Controls**: ALL ON/OFF, Lock/Unlock, Safety Stop, Stream control
+- **Clear Data**: Reset live data buffer
 
-### Tabs
+### Main Interface (Three-Panel Layout)
+1. **Left Panel - Control & Configuration**:
+   - **Data Mode**: Live Data vs File Analysis toggle
+   - **Device Controls**: Individual device ON/OFF with real-time status
+   - **Script Controls**: Load, start, stop script execution
+   - **Data Type Selection**: Voltage, Current, Power, Status checkboxes
+   - **Display Options**: Auto-resize, crosshair toggles
 
-- **All Tab**: Combined view showing all devices on separate graphs for each data type
-- **Device Tabs**: Individual tabs for GSE-1, GSE-2, TE-1, TE-2, TE-3, TE-R showing device-specific data
+2. **Center Panel - Tabbed Plot Area**:
+   - **"All" Tab**: Combined view with color-coded legends
+   - **Device Tabs**: GSE-1, GSE-2, TE-R, TE-1, TE-2, TE-3 individual views
+   - **Smooth Plotting**: 50ms updates with no flickering
+   - **Interactive Features**: Crosshair tracking, linked axes
 
-### Data Type Selection
+3. **Right Panel - Real-Time Analysis**:
+   - **Script Information**: Current script status and configuration
+   - **Device Statistics**: Min/max/average values, energy consumption
+   - **System Summary**: Multi-device aggregated analysis
+   - **Data Quality**: Polling rates, corruption detection
 
-Use the checkboxes in the left panel to show/hide:
-- ✅ **Voltage**: Device voltage readings (V)
-- ✅ **Current**: Device current consumption (A)
-- ✅ **Power**: Device power consumption (W)
-- ✅ **Status**: Device operational status
-
-## Keyboard Shortcuts
+## ⌨️ Keyboard Shortcuts
 
 ### File Operations
-- `Ctrl+O` - Open file
-- `Ctrl+S` - Save analysis (shows format selection dialog)
+- `Ctrl+O` - Open historical data file
+- `Ctrl+S` - Save analysis (format selection)
+- `Ctrl+Shift+S` - Save live data
 - `Ctrl+Q` - Exit application
+
+### Connection & Control
+- `F5` - Get Teensy status
+- `Ctrl+Shift+X` - Open debug console
 
 ### Navigation
 - `0` or `A` - Switch to "All" tab
-- `1` - Switch to GSE-1 tab
-- `2` - Switch to GSE-2 tab
-- `3` - Switch to TE-1 tab
-- `4` - Switch to TE-2 tab
-- `5` - Switch to TE-3 tab
-- `6` - Switch to TE-R tab
+- `1-6` - Switch to device tabs (GSE-1, GSE-2, TE-R, TE-1, TE-2, TE-3)
+- `F9` - Toggle analysis side panel
 
-### View Controls
-- `X` - Toggle side panel
+### Settings
+- `Ctrl+,` - Open settings dialog
 
-## Features
+## ⚙️ Advanced Features
 
-### Interactive Graphs
+### Settings Configuration (`Ctrl+,`)
 
-- **Crosshair Cursor**: Move your mouse over any graph to see precise values
-- **Linked X-Axes**: All graphs scroll and zoom together
-- **Color-Coded Data**: Each device has a unique color for easy identification
-- **Professional Labels**: Clean axis labels with proper units (V, A, W)
+**Data Tab**:
+- **Polling Rate**: 50-5000ms intervals
+- **Max Data Points**: Buffer size for live data
+- **Window Modes**: Growing window vs Sliding time window
+- **Data Filtering**: Moving average and interpolation options
 
-### Analysis Panel
+**Display Tab**:
+- **Auto-resize**: Automatic plot scaling
+- **Line Thickness**: 1-10 pixel line width
+- **Grid & Crosshair**: Visual enhancement options
+- **Y-Axis Ranges**: Custom default ranges per data type
 
-The right side panel shows comprehensive analysis including:
+**Colors Tab**:
+- **Device Colors**: Customizable color scheme for each device
 
-**Device-Specific Analysis** (when viewing individual device tabs):
-- Voltage statistics (min, max, average)
-- Current statistics with amp-hour calculations
-- Power analysis and energy consumption
-- Data quality indicators
-- Polling rate information
+**Connection Tab**:
+- **Serial Baud Rate**: Configurable up to 2M baud
 
-**System Summary** (when viewing "All" tab):
-- System-wide voltage analysis
-- Total current and power consumption
-- Energy analysis across all devices
-- Device performance comparisons
+### Window Modes
 
-### Export Options
+**Growing Window Mode**:
+- Continuously grows as data arrives
+- Optional maximum point limit
+- Best for short-term monitoring
 
-Save your analysis in multiple formats:
+**Sliding Time Window Mode**:
+- Maintains fixed time duration view (1-300 seconds)
+- Automatically scrolls with new data
+- Perfect for continuous monitoring
 
-1. **Text (.txt)**: Human-readable analysis report
-2. **CSV (.csv)**: Spreadsheet-compatible data
-3. **Excel (.xlsx)**: Professional multi-sheet workbook with device-specific sheets
+### Debug Console (`Ctrl+Shift+X`)
 
-Access export options via:
-- `Ctrl+S` → Format selection dialog
-- `File` → `Export Analysis` → Choose format
+- **Real-time Monitoring**: All communication traffic
+- **JSON Commands**: Send custom commands to Teensy
+- **Auto-scroll**: Continuous log viewing
+- **Command History**: Previous commands accessible
 
-## File Management
+### Script Management
 
-### Recent Files
-- Automatically tracks recently opened files
-- Access via `File` → `Recent Files`
-- Clears non-existent files automatically
+- **Automatic Discovery**: Lists available scripts from Teensy
+- **Load & Execute**: One-click script deployment
+- **Status Monitoring**: Real-time script execution feedback
+- **Integration**: Script information in analysis panel
 
-### File Validation
-The application validates JSON files for:
-- Proper JSON structure
-- Required time field
-- Expected device data fields
-- Data consistency
+## 📤 Export & Data Management
 
-## Tips for Best Results
+### Live Data Export
+- **Automatic Timestamping**: All data timestamped for analysis
+- **Multiple Formats**: JSON, CSV, Excel support
+- **Real-time Saving**: Export during streaming
+- **Metadata Inclusion**: Connection info, script details
 
-1. **Data Quality**: Ensure your JSON files have consistent timestamps and no missing data points
-2. **File Size**: The application handles large files efficiently, but very large datasets may require more memory
-3. **Export Timing**: Export analysis after viewing the data to ensure all calculations are complete
-4. **Keyboard Navigation**: Use keyboard shortcuts for faster navigation between devices
-5. **Side Panel**: Keep the analysis panel open to monitor real-time statistics while browsing data
+### Analysis Export
+- **Comprehensive Reports**: Device and system-wide analysis
+- **Professional Formatting**: Multi-sheet Excel workbooks
+- **Script Integration**: Automated vs manual recording identification
+- **Energy Calculations**: Amp-hours and watt-hours analysis
 
-    ## TODO:
-    - [ ] Add support for real-time data streaming
-    - [ ] Implement advanced filtering options
-    - [X] Add automated timed events
-    - [ ] Add telemetry input support
+## 🔧 Troubleshooting
 
-## Troubleshooting
+### Connection Issues
 
-### Common Issues
+**Cannot Connect to Teensy**:
+- Verify IP address and port settings
+- Check network connectivity (ping test)
+- Ensure Teensy firmware is running
+- Try different connection type (TCP → Serial)
 
-**File Won't Load**
-- Check JSON syntax validity
-- Ensure required device fields are present
-- Verify time field exists and contains valid timestamps
+**Serial Port Not Found**:
+- Install pyserial: `pip install pyserial`
+- Check USB cable connection
+- Verify driver installation
+- Click "Refresh Ports" button
 
-**Missing Excel Export**
-- Install optional dependencies: `pip install pandas openpyxl`
+### Performance Issues
 
-**Graphs Not Displaying**
-- Check that at least one data type is selected in the left panel
-- Verify the selected device has data in the JSON file
+**Flickering or Choppy Graphs**:
+- ✅ **Fixed in v2.1**: Smooth 50ms updates implemented
+- Reduce polling rate in Settings if needed
+- Disable unnecessary data types
+- Check "Auto-resize plots" setting
 
-**Performance Issues**
-- For very large files, consider reducing the number of visible data types
-- Close unused applications to free up memory
+**High CPU Usage**:
+- Reduce max data points in Settings
+- Use Sliding Time Window mode
+- Disable crosshair if not needed
+- Close debug console when not in use
 
-### Error Messages
+### Data Issues
 
-- **"Invalid JSON structure"**: Your file doesn't match the expected format
-- **"Missing required fields"**: Device data fields are missing from the JSON
-- **"No analysis data available"**: No valid device data found in the file
+**Missing Data or Gaps**:
+- Check network stability for TCP/UDP
+- Verify serial connection stability
+- Monitor debug console for errors
+- Adjust polling rate based on system capability
 
-## Support
+**Incorrect Values**:
+- Verify Teensy firmware compatibility
+- Check device calibration
+- Review data conversion settings
+- Use debug console to monitor raw data
 
-For issues or feature requests, please check that:
-1. Your JSON file follows the correct format
-2. All required dependencies are installed
-3. You're using a supported Python version (3.7+)
+## 🆕 Recent Updates (v2.1)
 
-## System Requirements
+### Performance Enhancements
+- ✅ **Eliminated Graph Flickering**: Stable 50ms update intervals
+- ✅ **Smooth Data Flow**: No more chunky updates
+- ✅ **Fixed Plot Initialization**: Immediate graph display when streaming starts
+- ✅ **Optimized Memory Usage**: Efficient deque-based data management
 
-- **Operating System**: Windows, macOS, or Linux
-- **Python**: 3.7 or higher
-- **Memory**: Minimum 4GB RAM (8GB recommended for large datasets)
-- **Storage**: Minimal space required for application, additional space for data files
+### Feature Additions
+- ✅ **Sliding Time Window**: Configurable duration with real-time scrolling
+- ✅ **Enhanced Legend Support**: Color-coded device identification
+- ✅ **Improved Status Plots**: Stable Y-axis scaling for digital signals
+- ✅ **Debug Console**: Comprehensive monitoring and command interface
+
+### Bug Fixes
+- ✅ **Plot Layout Stability**: Fixed height jumping issues
+- ✅ **Data Type Conversion**: Proper current unit handling (mA → A)
+- ✅ **Tab Switching**: Immediate plot updates when changing views
+- ✅ **Window Mode**: Fixed sliding window time calculations
+
+## 📈 System Specifications
+
+### Supported Devices
+- **GSE-1**: Ground Support Equipment #1
+- **GSE-2**: Ground Support Equipment #2  
+- **TE-R**: Test Equipment - Recorder
+- **TE-1**: Test Equipment #1
+- **TE-2**: Test Equipment #2
+- **TE-3**: Test Equipment #3
+
+### Measurement Ranges
+- **Voltage**: 0-35V (configurable)
+- **Current**: 0-5A (configurable)
+- **Power**: 0-100W (calculated)
+- **Status**: Digital ON/OFF states
+
+### Communication Specifications
+- **TCP**: Port 8080 (default), persistent connection
+- **UDP**: Port 8081 (default), stateless packets
+- **Serial**: Up to 2M baud, USB connection
+- **Update Rate**: 50ms minimum, configurable up to 5000ms
+
+## 🎯 Mission Applications
+
+Originally developed for the **NASA RockSatX 2025 mission**, this application provides:
+
+- **Pre-Flight Testing**: Comprehensive system validation
+- **Real-Time Monitoring**: Live mission data streaming
+- **Post-Flight Analysis**: Detailed performance evaluation
+- **Energy Management**: Power consumption optimization
+- **Fault Detection**: Real-time anomaly identification
+
+## 📞 Support & Development
+
+### Feature Requests
+- Real-time data streaming ✅ **Completed**
+- Advanced filtering options ⏳ **In Progress**
+- Automated timed events ✅ **Completed**
+- Telemetry input support 📋 **Planned**
+
+### Known Limitations
+- Maximum 6 simultaneous devices
+- JSON-based communication protocol
+- Windows/macOS/Linux desktop only
+
+### Development Status
+- **Version**: 2.1
+- **Status**: Active Development
+- **License**: MIT
+- **Platform**: Cross-platform (Python 3.8+)
 
 ---
 
-**Version**: 2.0  
-**License**: MIT  
-**Author**: Aram Aprahamian
+**Developed for NASA RockSatX 2025 Mission**  
+**Author**: Aram Aprahamian  
+**Last Updated**: July 2025
+
+For technical support or feature requests, ensure your setup meets the minimum requirements and check the debug console for detailed error information.
 
