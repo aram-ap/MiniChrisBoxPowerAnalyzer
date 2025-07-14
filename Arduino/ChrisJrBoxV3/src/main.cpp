@@ -1,6 +1,24 @@
+/**
+ * @file main.cpp
+ * @brief Network-enabled power controller for Teensy 4.1 with touchscreen interface. Built for Mini Chris Box V4-5.x.
+ * @author Aram Aprahamian
+ * @version 5.1
+ * @date July 14, 2025
+ * 
+ * Features:
+ * - 6-channel power switching with INA226 current monitoring
+ * - 4.8" touchscreen display with ST7796S controller
+ * - Ethernet connectivity with TCP/UDP communication
+ * - SD card data logging (external and internal)
+ * - Script-based automation system
+ * - Real-time clock integration
+ * - Fan control and environmental monitoring
+ */
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <EEPROM.h>
+#include <QNEthernet.h>
 #include <Bounce2.h>
 #include <INA226.h>
 #include <Adafruit_GFX.h>
@@ -15,60 +33,44 @@
 #include <TimeLib.h>
 #include <DS1307RTC.h>
 #include <ArduinoJson.h>
-#include <NativeEthernet.h>
-#include <NativeEthernetUdp.h>
 
-// ==================== Version Information ====================
+using namespace qindesign::network;
+
+// ==================== System Configuration ====================
 const char* SOFTWARE_VERSION = "Mini Chris Box V5.1 - Network Enabled";
 
-// ==================== Network Configuration ====================
-struct NetworkConfig {
-  bool enableEthernet = true;
-  bool useDHCP = true;
-  uint32_t staticIP = 0xC0A80164;  // 192.168.1.100 as uint32_t
-  uint32_t subnet = 0xFFFFFF00;   // 255.255.255.0 as uint32_t
-  uint32_t gateway = 0xC0A80101;  // 192.168.1.1 as uint32_t
-  uint32_t dns = 0x08080808;      // 8.8.8.8 as uint32_t
-  uint16_t tcpPort = 8080;
-  uint16_t udpPort = 8081;
-} networkConfig;
+// EEPROM validation constants
+#define EEPROM_MAGIC_NUMBER 0xDEADBEEF
+#define EEPROM_MAGIC_ADDR 0
+#define EEPROM_VERSION_ADDR 4
+#define EEPROM_VERSION_NUMBER 2
 
-// Network state
-EthernetServer tcpServer(8080);
-EthernetUDP udp;
-EthernetClient tcpClients[5]; // Support up to 5 concurrent TCP connections
-bool networkInitialized = false;
-bool ethernetConnected = false;
-unsigned long lastNetworkCheck = 0;
-const unsigned long NETWORK_CHECK_INTERVAL = 5000; // Check every 5 seconds
+// Performance timing constants
+#define SENSOR_UPDATE_INTERVAL 50
+#define DISPLAY_UPDATE_INTERVAL 200
+#define LOG_WRITE_INTERVAL 50
 
-// Data streaming configuration
-struct StreamConfig {
-  bool usbStreamEnabled = false;
-  bool tcpStreamEnabled = false;
-  bool udpStreamEnabled = false;
-  unsigned long streamInterval = 100; // Default 100ms
-  bool streamActiveOnly = false; // Stream only when devices are active
-} streamConfig;
-
-unsigned long lastStreamTime = 0;
-bool streamingActive = false;
-
-// Connection heartbeat
-unsigned long lastHeartbeat = 0;
-const unsigned long HEARTBEAT_INTERVAL = 10000; // 10 seconds
-bool heartbeatEnabled = true;
-
-// Command response buffer
-char responseBuffer[1024];
-
-// ==================== FIXED: Global SD Check Interval ====================
-unsigned long SD_CHECK_INTERVAL = 2000; // 2 seconds - global variable
-
-// ==================== LED Pins ====================
+// Hardware pin definitions
 const int pwrLed = 22;
 const int lockLed = 21;
 const int stopLed = 20;
+#define FAN_PWM_PIN 33
+
+// Display and touch pins
+#define TFT_CS 10
+#define TFT_DC 9
+#define TFT_RST 7
+#define TOUCH_CS 8
+#define TOUCH_IRQ 14
+
+// SD card pins
+#define SD_CS 36
+#define BUILTIN_SDCARD 254
+#define SCRIPTS_DIR "/scripts"
+
+// Screen dimensions
+const int SCREEN_WIDTH = 480;
+const int SCREEN_HEIGHT = 320;
 
 // ==================== Color Definitions ====================
 #define COLOR_BLACK     0x0000
@@ -86,182 +88,68 @@ const int stopLed = 20;
 #define COLOR_CYAN      0x07FF
 #define COLOR_BLUE      0x001F
 #define COLOR_ORANGE    0xFD20
-#define COLOR_DARK_ROW1 0x2104  // Dark blue-gray for alternating rows
-#define COLOR_DARK_ROW2 0x18C3  // Slightly lighter dark blue-gray
-#define COLOR_LIST_ROW1 0x1082  // FIXED: Alternating list backgrounds
-#define COLOR_LIST_ROW2 0x0841  // FIXED: Darker alternating background
+#define COLOR_DARK_ROW1 0x2104
+#define COLOR_DARK_ROW2 0x18C3
+#define COLOR_LIST_ROW1 0x1082
+#define COLOR_LIST_ROW2 0x0841
 
-// ==================== Display/Touch Pins ====================
-#define TFT_CS 10
-#define TFT_DC 9
-#define TFT_RST 7
-#define TOUCH_CS 8
-#define TOUCH_IRQ 14
+// ==================== Network Configuration ====================
+struct NetworkConfig {
+  bool enableEthernet = true;
+  bool useDHCP = true;
+  uint32_t staticIP = 0xC0A80164;    // 192.168.1.100
+  uint32_t subnet = 0xFFFFFF00;     // 255.255.255.0
+  uint32_t gateway = 0xC0A80101;    // 192.168.1.1
+  uint32_t dns = 0x08080808;        // 8.8.8.8
+  uint16_t tcpPort = 8080;
+  uint16_t udpPort = 8081;
+  uint32_t udpTargetIP = 0xFFFFFFFF;
+  uint16_t udpTargetPort = 8082;
+  unsigned long networkTimeout = 10000;
+  unsigned long dhcpTimeout = 8000;
+} networkConfig;
 
+// Network state variables
+EthernetServer tcpServer(8080);
+EthernetUDP udp;
+EthernetClient tcpClients[5];
+bool networkInitialized = false;
+bool ethernetConnected = false;
+unsigned long lastNetworkCheck = 0;
+const unsigned long NETWORK_CHECK_INTERVAL = 5000;
+
+// Network initialization state machine
+enum NetworkInitState {
+  NET_IDLE, NET_CHECKING_LINK, NET_INITIALIZING, 
+  NET_DHCP_WAIT, NET_INITIALIZED, NET_FAILED
+};
+NetworkInitState networkInitState = NET_IDLE;
+unsigned long networkInitStartTime = 0;
+unsigned long lastInitScreenUpdate = 0;
+String lastInitStatusText = "";
+
+// Data streaming configuration
+struct StreamConfig {
+  bool usbStreamEnabled = false;
+  bool tcpStreamEnabled = false;
+  bool udpStreamEnabled = false;
+  unsigned long streamInterval = 100;
+  bool streamActiveOnly = false;
+} streamConfig;
+
+unsigned long lastStreamTime = 0;
+bool streamingActive = false;
+unsigned long lastHeartbeat = 0;
+const unsigned long HEARTBEAT_INTERVAL = 10000;
+bool heartbeatEnabled = true;
+char responseBuffer[1024];
+
+// ==================== Hardware Objects ====================
 Adafruit_ST7796S tft = Adafruit_ST7796S(TFT_CS, TFT_DC, TFT_RST);
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
-
-const int SCREEN_WIDTH = 480;
-const int SCREEN_HEIGHT = 320;
-
-// ==================== SD Card Context Management ====================
-#define SD_CS 36
-#define BUILTIN_SDCARD 254
 File logFile;
-bool sdAvailable = false;
-bool internalSdAvailable = false;
-bool currentSDContext = false; // false = external, true = internal
-unsigned long lastSDCheck = 0; // FIXED: Now used for smart auto-check
-#define SCRIPTS_DIR "/scripts"
 
-// ==================== Performance Timing ====================
-#define SENSOR_UPDATE_INTERVAL 50    // Read sensors every 50ms
-#define DISPLAY_UPDATE_INTERVAL 200  // Update display every 200ms
-#define LOG_WRITE_INTERVAL 50        // Write logs every 50ms
-
-unsigned long lastSensorUpdate = 0;
-unsigned long lastDisplayUpdate = 0;
-unsigned long lastLogWrite = 0;
-
-// Power LED flashing for recording
-unsigned long lastPowerLedBlink = 0;
-bool powerLedState = false;
-
-// ==================== Serial Command Processing ====================
-String serialBuffer = "";
-bool csvOutput = false;
-bool csvHeaderWritten = false;
-
-// ==================== Network Command Buffer ====================
-String networkCommandBuffer = "";
-
-// ==================== Button Geometry ====================
-struct ButtonRegion {
-  int x, y, w, h;
-  const char* label;
-  bool pressed;
-  uint16_t color;
-  bool enabled;
-};
-
-// Main screen buttons
-ButtonRegion btnRecord     = {  5,  5,   120, 35, "RECORD",    false, COLOR_RECORD,    false };
-ButtonRegion btnSDRefresh  = {130,  5,    40, 35, "SD",        false, COLOR_CYAN,      true };
-ButtonRegion btnStop       = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
-ButtonRegion btnLock       = { SCREEN_WIDTH - 70, SCREEN_HEIGHT - 40, 65, 35, "LOCK",  false, COLOR_YELLOW, true };
-ButtonRegion btnAllOn      = {  5,  SCREEN_HEIGHT - 40, 80, 35, "ALL ON", false, COLOR_YELLOW, true };
-ButtonRegion btnAllOff     = { 90,  SCREEN_HEIGHT - 40, 80, 35, "ALL OFF",false, COLOR_YELLOW, true };
-ButtonRegion btnScript     = {175,  SCREEN_HEIGHT - 40, 60, 35, "Script", false, COLOR_YELLOW, true };
-ButtonRegion btnEdit       = {240,  SCREEN_HEIGHT - 40, 60, 35, "Edit",   false, COLOR_YELLOW, true };
-ButtonRegion btnSettings   = {305,  SCREEN_HEIGHT - 40, 80, 35, "Settings",false, COLOR_YELLOW, true };
-
-// Settings panel buttons
-ButtonRegion btnSettingsBack = { 5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
-ButtonRegion btnSettingsStop = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
-ButtonRegion btnAbout = { 390, SCREEN_HEIGHT - 40, 80, 35, "About", false, COLOR_YELLOW, true };
-
-// Settings input buttons
-ButtonRegion btnFanSpeedInput = { 320, 80, 80, 30, "", false, COLOR_YELLOW, true };
-ButtonRegion btnUpdateRateInput = { 320, 120, 80, 30, "", false, COLOR_YELLOW, true };
-ButtonRegion btnSetTimeDate = { 320, 160, 80, 30, "Set", false, COLOR_YELLOW, true };
-ButtonRegion btnTimeFormatToggle = { 320, 200, 80, 30, "24H", false, COLOR_YELLOW, true };
-ButtonRegion btnDarkModeToggle = { 320, 240, 80, 30, "ON", false, COLOR_YELLOW, true };
-
-// About page buttons
-ButtonRegion btnAboutBack = { 5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
-ButtonRegion btnAboutStop = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
-
-// Script panel buttons
-ButtonRegion btnScriptBack   = {  5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
-ButtonRegion btnScriptStop   = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
-ButtonRegion btnScriptLoad   = {  5,  SCREEN_HEIGHT - 40, 60, 35, "Load", false, COLOR_YELLOW, true };
-ButtonRegion btnScriptEdit   = { 70,  SCREEN_HEIGHT - 40, 60, 35, "Edit", false, COLOR_YELLOW, true };
-ButtonRegion btnScriptStart  = {135, SCREEN_HEIGHT - 40, 70, 35, "Start", false, COLOR_GREEN,  true };
-ButtonRegion btnScriptEnd    = {210, SCREEN_HEIGHT - 40, 50, 35,  "Stop",  false, COLOR_RED,    true };
-ButtonRegion btnScriptRecord = {265, SCREEN_HEIGHT - 40, 70, 35, "Record", false, COLOR_BLUE,  true };
-
-// Edit panel buttons
-ButtonRegion btnEditBack     = {  5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
-ButtonRegion btnEditStop     = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
-ButtonRegion btnEditLoad     = {  5,  SCREEN_HEIGHT - 40, 80, 35, "Load", false, COLOR_YELLOW, true };
-ButtonRegion btnEditSave     = {  90, SCREEN_HEIGHT - 40, 80, 35, "Save", false, COLOR_YELLOW, true };
-ButtonRegion btnEditNew      = { 175, SCREEN_HEIGHT - 40, 80, 35, "New",  false, COLOR_YELLOW, true };
-
-ButtonRegion btnKeypadBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
-ButtonRegion btnEditSaveBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
-ButtonRegion btnEditNameBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
-ButtonRegion btnDateTimeBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
-ButtonRegion btnEditFieldBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
-
-ButtonRegion btnScriptSelect = {SCREEN_WIDTH - 85, SCREEN_HEIGHT - 40, 80, 35, "Select", false, COLOR_GREEN, true};
-ButtonRegion btnScriptDelete = {SCREEN_WIDTH - 170, SCREEN_HEIGHT - 40, 80, 35, "Delete", false, COLOR_RED, true};
-ButtonRegion btnSortDropdown = {SCREEN_WIDTH - 100, 5, 95, 35, "Name", false, COLOR_YELLOW, true};
-ButtonRegion btnDeleteYes = {150, 150, 80, 35, "Yes", false, COLOR_RED, true};
-ButtonRegion btnDeleteNo = {250, 150, 80, 35, "No", false, COLOR_YELLOW, true};
-
-// Script editing fields for device timing
-struct DeviceTimingField {
-  int x, y, w, h;
-  int deviceIndex;
-  int fieldType; // 0=ON time, 1=OFF time, 2=checkbox
-  bool isSelected;
-};
-
-#define MAX_DEVICE_FIELDS 30
-DeviceTimingField deviceFields[MAX_DEVICE_FIELDS];
-int numDeviceFields = 0;
-int selectedDeviceField = -1;
-
-// Script editing fields for T_START, T_END, Record
-struct EditField {
-  int x, y, w, h;
-  char value[32];
-  bool isSelected;
-};
-
-#define MAX_EDIT_FIELDS 10
-EditField editFields[MAX_EDIT_FIELDS];
-int numEditFields = 0;
-int selectedField = -1;
-
-// Script metadata structure
-struct ScriptMetadata {
-  char name[32];
-  char filename[32];
-  time_t dateCreated;
-  time_t lastUsed;
-};
-
-// For script load/save dialogs
-#define MAX_SCRIPTS 50
-ScriptMetadata scriptList[MAX_SCRIPTS];
-int numScripts = 0;
-int scriptListOffset = 0;
-int selectedScript = -1;
-int highlightedScript = -1;
-
-// Script sorting
-enum SortMode { SORT_NAME, SORT_LAST_USED, SORT_DATE_CREATED };
-SortMode currentSortMode = SORT_NAME;
-
-// Delete confirmation
-bool showDeleteConfirm = false;
-char deleteScriptName[32] = "";
-
-// For script name editing
-char currentEditName[32] = "Untitled";
-bool isEditingName = false;
-bool shiftMode = false;
-bool capsMode = false;
-bool alphaMode = false;
-
-// T9-style keypad variables
-char lastKey = '\0';
-unsigned long lastKeyTime = 0;
-int currentLetterIndex = 0;
-const unsigned long T9_TIMEOUT = 300; // 0.3 seconds
-
-// ==================== INA226 Setup ====================
+// INA226 current/voltage sensors
 INA226 ina_gse1(0x40);
 INA226 ina_gse2(0x41);
 INA226 ina_ter(0x42);
@@ -270,21 +158,56 @@ INA226 ina_te2(0x44);
 INA226 ina_te3(0x45);
 INA226 ina_all(0x46);
 INA226* inaDevices[] = { &ina_gse1, &ina_gse2, &ina_ter, &ina_te1, &ina_te2, &ina_te3, &ina_all };
-const char* inaNames[] = { "GSE-1", "GSE-2", "TE-R", "TE-1", "TE-2", "TE-3", "Total" };
+const char* inaNames[] = { "GSE-1", "GSE-2", "TE-R", "TE-1", "TE-2", "TE-3", "Bus" };
 const int numIna = 7;
 float deviceVoltage[numIna];
 float deviceCurrent[numIna];
 float devicePower[numIna];
 
+// ==================== System State Variables ====================
+bool lock = false;
+bool safetyStop = false;
+bool lockBeforeStop = false;
+bool recording = false;
+bool recordingScript = false;
+bool sdAvailable = false;
+bool internalSdAvailable = false;
+bool currentSDContext = false;
 bool serialAvailable = false;
+bool fanOn = false;
+bool use24HourFormat = true;
+bool darkMode = true;
+bool csvOutput = false;
+bool csvHeaderWritten = false;
+bool firstDataPoint = true;
 
-// ==================== Relay/Output Setup ====================
+// Timing variables
+unsigned long lastSensorUpdate = 0;
+unsigned long lastDisplayUpdate = 0;
+unsigned long lastLogWrite = 0;
+unsigned long lastTouchTime = 0;
+unsigned long lastSDCheck = 0;
+unsigned long lastClockRefresh = 0;
+unsigned long lastPowerLedBlink = 0;
+unsigned long recordStartMillis = 0;
+unsigned long SD_CHECK_INTERVAL = 2000;
+unsigned long updateRate = 100;
+const unsigned long touchDebounceMs = 200;
+
+// Settings
+int fanSpeed = 255;
+bool powerLedState = false;
+String serialBuffer = "";
+String networkCommandBuffer = "";
+char recordFilename[64] = "power_data.json";
+
+// ==================== Switch/Output Configuration ====================
 struct SwitchOutput {
   const char* name;
   int outputPin;
   int switchPin;
   Bounce debouncer;
-  bool state;  // HIGH=ON, LOW=OFF
+  bool state;
 };
 
 SwitchOutput switchOutputs[] = {
@@ -297,7 +220,7 @@ SwitchOutput switchOutputs[] = {
 };
 const int numSwitches = sizeof(switchOutputs) / sizeof(SwitchOutput);
 
-// ==================== Scripts & Timed Events ====================
+// ==================== Script System ====================
 struct DeviceScript {
   bool enabled;
   int onTime;
@@ -320,91 +243,174 @@ bool isScriptPaused = false;
 unsigned long scriptStartMillis = 0;
 unsigned long scriptPausedTime = 0;
 unsigned long pauseStartMillis = 0;
-bool scriptEndedEarly = false; // FIXED: Track if script ended early
+bool scriptEndedEarly = false;
 bool lockStateBeforeScript = false;
-
-// Track which devices have been turned on/off to prevent loops
 bool deviceOnTriggered[6] = {false, false, false, false, false, false};
 bool deviceOffTriggered[6] = {false, false, false, false, false, false};
-
-// For blinking the lock LED every 0.75s while script is running
 unsigned long lastLockBlink = 0;
 bool lockLedState = false;
-
 long scriptTimeSeconds = 0;
 
-// ==================== Global State ====================
-bool lock = false;
-bool safetyStop = false;
-bool lockBeforeStop = false;
-
-// ==================== Touch Debounce ====================
-unsigned long lastTouchTime = 0;
-const unsigned long touchDebounceMs = 200;
-
-// ==================== Recording State ====================
-bool recording = false;
-bool recordingScript = false;
-unsigned long recordStartMillis = 0;
-char recordFilename[64] = "power_data.json"; // FIXED: Larger buffer for script names
-bool firstDataPoint = true;
-
-// ==================== GUI Modes ====================
+// ==================== GUI System ====================
 enum GUIMode {
-  MODE_MAIN,
-  MODE_SETTINGS,
-  MODE_KEYPAD,
-  MODE_SCRIPT,
-  MODE_SCRIPT_LOAD,
-  MODE_EDIT,
-  MODE_EDIT_LOAD,
-  MODE_EDIT_SAVE,
-  MODE_EDIT_FIELD,
-  MODE_DATE_TIME,
-  MODE_EDIT_NAME,
-  MODE_DELETE_CONFIRM,
-  MODE_ABOUT
+  MODE_MAIN, MODE_SETTINGS, MODE_NETWORK, MODE_NETWORK_EDIT, MODE_KEYPAD,
+  MODE_SCRIPT, MODE_SCRIPT_LOAD, MODE_EDIT, MODE_EDIT_LOAD, MODE_EDIT_SAVE,
+  MODE_EDIT_FIELD, MODE_DATE_TIME, MODE_EDIT_NAME, MODE_DELETE_CONFIRM, MODE_ABOUT
 };
 GUIMode currentMode = MODE_MAIN;
 GUIMode previousMode = MODE_MAIN;
 
-// ==================== FAN PWM ====================
-#define FAN_PWM_PIN 33
-bool fanOn = false;
-int fanSpeed = 255;
+// Button structure
+struct ButtonRegion {
+  int x, y, w, h;
+  const char* label;
+  bool pressed;
+  uint16_t color;
+  bool enabled;
+};
 
-// ==================== Update Rate ====================
-unsigned long updateRate = 100;
-unsigned long lastClockRefresh = 0;
+// Main screen buttons
+ButtonRegion btnRecord     = {  5,  5,   120, 35, "RECORD",    false, COLOR_RECORD,    false };
+ButtonRegion btnSDRefresh  = {130,  5,    40, 35, "SD",        false, COLOR_CYAN,      true };
+ButtonRegion btnStop       = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
+ButtonRegion btnLock       = { SCREEN_WIDTH - 70, SCREEN_HEIGHT - 40, 65, 35, "LOCK",  false, COLOR_YELLOW, true };
+ButtonRegion btnAllOn      = {  5,  SCREEN_HEIGHT - 40, 80, 35, "ALL ON", false, COLOR_YELLOW, true };
+ButtonRegion btnAllOff     = { 90,  SCREEN_HEIGHT - 40, 80, 35, "ALL OFF",false, COLOR_YELLOW, true };
+ButtonRegion btnScript     = {175,  SCREEN_HEIGHT - 40, 60, 35, "Script", false, COLOR_YELLOW, true };
+ButtonRegion btnEdit       = {240,  SCREEN_HEIGHT - 40, 60, 35, "Edit",   false, COLOR_YELLOW, true };
+ButtonRegion btnSettings   = {305,  SCREEN_HEIGHT - 40, 80, 35, "Settings",false, COLOR_YELLOW, true };
 
-// ==================== Time Format ====================
-bool use24HourFormat = true;
+// Settings panel buttons
+ButtonRegion btnSettingsBack = { 5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
+ButtonRegion btnSettingsStop = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
+ButtonRegion btnNetwork = { 310, SCREEN_HEIGHT - 40, 78, 35, "Network", false, COLOR_YELLOW, true };
+ButtonRegion btnAbout = { 390, SCREEN_HEIGHT - 40, 80, 35, "About", false, COLOR_YELLOW, true };
 
-// ==================== Dark Mode Setting ====================
-bool darkMode = true;
+// Settings input buttons
+ButtonRegion btnFanSpeedInput = { 320, 70, 80, 30, "", false, COLOR_YELLOW, true };
+ButtonRegion btnUpdateRateInput = { 320, 110, 80, 30, "", false, COLOR_YELLOW, true };
+ButtonRegion btnSetTimeDate = { 320, 150, 80, 30, "Set", false, COLOR_YELLOW, true };
+ButtonRegion btnTimeFormatToggle = { 320, 190, 80, 30, "24H", false, COLOR_YELLOW, true };
+ButtonRegion btnDarkModeToggle = { 320, 230, 80, 30, "ON", false, COLOR_YELLOW, true };
 
-// ==================== EEPROM ADDRESSES ====================
-#define EEPROM_FAN_ON_ADDR     0
-#define EEPROM_FAN_SPEED_ADDR  4
-#define EEPROM_UPDATE_RATE_ADDR 8
-#define EEPROM_TIME_FORMAT_ADDR 12
-#define EEPROM_DARK_MODE_ADDR  16
-#define EEPROM_NETWORK_CONFIG_ADDR 20
+// Network settings buttons
+ButtonRegion btnNetworkBack = { 5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
+ButtonRegion btnNetworkStop = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
+ButtonRegion btnNetworkEdit = { 320, SCREEN_HEIGHT - 40, 80, 35, "Edit", false, COLOR_YELLOW, true };
+ButtonRegion btnEnableLanToggle = { 320, 70, 80, 30, "ON", false, COLOR_YELLOW, true };
 
-// ==================== Date/Time Editing ====================
-tmElements_t tmSet;
+// Network edit buttons
+ButtonRegion btnNetworkEditBack = { 5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
+ButtonRegion btnNetworkEditStop = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
+ButtonRegion btnNetworkEditSave = { 320, SCREEN_HEIGHT - 40, 80, 35, "Save", false, COLOR_GREEN, true };
+ButtonRegion btnDhcpToggle = { 320, 70, 80, 30, "ON", false, COLOR_YELLOW, true };
 
-// ==================== Keypad Setup ====================
+// About page buttons
+ButtonRegion btnAboutBack = { 5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
+ButtonRegion btnAboutStop = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
+
+// Script panel buttons
+ButtonRegion btnScriptBack   = {  5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
+ButtonRegion btnScriptStop   = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
+ButtonRegion btnScriptLoad   = {  5,  SCREEN_HEIGHT - 40, 60, 35, "Load", false, COLOR_YELLOW, true };
+ButtonRegion btnScriptEdit   = { 70,  SCREEN_HEIGHT - 40, 60, 35, "Edit", false, COLOR_YELLOW, true };
+ButtonRegion btnScriptStart  = {135, SCREEN_HEIGHT - 40, 70, 35, "Start", false, COLOR_GREEN,  true };
+ButtonRegion btnScriptEnd    = {210, SCREEN_HEIGHT - 40, 50, 35,  "Stop",  false, COLOR_RED,    true };
+ButtonRegion btnScriptRecord = {265, SCREEN_HEIGHT - 40, 70, 35, "Record", false, COLOR_BLUE,  true };
+
+// Edit panel buttons
+ButtonRegion btnEditBack     = {  5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
+ButtonRegion btnEditStop     = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
+ButtonRegion btnEditLoad     = {  5,  SCREEN_HEIGHT - 40, 80, 35, "Load", false, COLOR_YELLOW, true };
+ButtonRegion btnEditSave     = {  90, SCREEN_HEIGHT - 40, 80, 35, "Save", false, COLOR_YELLOW, true };
+ButtonRegion btnEditNew      = { 175, SCREEN_HEIGHT - 40, 80, 35, "New",  false, COLOR_YELLOW, true };
+
+// Additional UI buttons
+ButtonRegion btnKeypadBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
+ButtonRegion btnEditSaveBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
+ButtonRegion btnEditNameBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
+ButtonRegion btnDateTimeBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
+ButtonRegion btnEditFieldBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
+ButtonRegion btnScriptSelect = {SCREEN_WIDTH - 85, SCREEN_HEIGHT - 40, 80, 35, "Select", false, COLOR_GREEN, true};
+ButtonRegion btnScriptDelete = {SCREEN_WIDTH - 170, SCREEN_HEIGHT - 40, 80, 35, "Delete", false, COLOR_RED, true};
+ButtonRegion btnSortDropdown = {SCREEN_WIDTH - 100, 5, 95, 35, "Name", false, COLOR_YELLOW, true};
+ButtonRegion btnDeleteYes = {150, 150, 80, 35, "Yes", false, COLOR_RED, true};
+ButtonRegion btnDeleteNo = {250, 150, 80, 35, "No", false, COLOR_YELLOW, true};
+
+// ==================== Edit Field Structures ====================
+struct DeviceTimingField {
+  int x, y, w, h;
+  int deviceIndex;
+  int fieldType; // 0=ON time, 1=OFF time, 2=checkbox
+  bool isSelected;
+};
+
+#define MAX_DEVICE_FIELDS 30
+DeviceTimingField deviceFields[MAX_DEVICE_FIELDS];
+int numDeviceFields = 0;
+int selectedDeviceField = -1;
+
+struct EditField {
+  int x, y, w, h;
+  char value[32];
+  bool isSelected;
+};
+
+#define MAX_EDIT_FIELDS 10
+EditField editFields[MAX_EDIT_FIELDS];
+int numEditFields = 0;
+int selectedField = -1;
+
+struct NetworkEditField {
+  int x, y, w, h;
+  char value[32];
+  int fieldType; // 0=IP, 1=Port, 2=Timeout
+  bool isSelected;
+};
+
+#define MAX_NETWORK_FIELDS 10
+NetworkEditField networkFields[MAX_NETWORK_FIELDS];
+int numNetworkFields = 0;
+int selectedNetworkField = -1;
+
+// ==================== Script Management ====================
+struct ScriptMetadata {
+  char name[32];
+  char filename[32];
+  time_t dateCreated;
+  time_t lastUsed;
+};
+
+#define MAX_SCRIPTS 50
+ScriptMetadata scriptList[MAX_SCRIPTS];
+int numScripts = 0;
+int scriptListOffset = 0;
+int selectedScript = -1;
+int highlightedScript = -1;
+
+enum SortMode { SORT_NAME, SORT_LAST_USED, SORT_DATE_CREATED };
+SortMode currentSortMode = SORT_NAME;
+
+bool showDeleteConfirm = false;
+char deleteScriptName[32] = "";
+char currentEditName[32] = "Untitled";
+bool isEditingName = false;
+bool shiftMode = false;
+bool capsMode = false;
+bool alphaMode = false;
+
+// T9 keypad variables
+char lastKey = '\0';
+unsigned long lastKeyTime = 0;
+int currentLetterIndex = 0;
+const unsigned long T9_TIMEOUT = 300;
+
+// ==================== Keypad System ====================
 enum KeypadMode {
-  KEYPAD_NONE,
-  KEYPAD_UPDATE_RATE,
-  KEYPAD_FAN_SPEED,
-  KEYPAD_SCRIPT_TSTART,
-  KEYPAD_SCRIPT_TEND,
-  KEYPAD_DEVICE_ON_TIME,
-  KEYPAD_DEVICE_OFF_TIME,
-  KEYPAD_SCRIPT_SEARCH,
-  KEYPAD_SCRIPT_NAME
+  KEYPAD_NONE, KEYPAD_UPDATE_RATE, KEYPAD_FAN_SPEED, KEYPAD_SCRIPT_TSTART,
+  KEYPAD_SCRIPT_TEND, KEYPAD_DEVICE_ON_TIME, KEYPAD_DEVICE_OFF_TIME,
+  KEYPAD_SCRIPT_SEARCH, KEYPAD_SCRIPT_NAME, KEYPAD_NETWORK_IP,
+  KEYPAD_NETWORK_PORT, KEYPAD_NETWORK_TIMEOUT
 };
 KeypadMode keypadMode = KEYPAD_NONE;
 
@@ -420,47 +426,61 @@ Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, 4, 4);
 char keypadBuffer[32] = "";
 int keypadPos = 0;
 
-// T9 keypad mapping
+// T9 keypad character mapping
 const char* t9Letters[] = {
   "-_ ", "abc", "def", "ghi", "jkl", "mno", "pqrs", "tuv", "wxyz", ""
 };
 
-// ==================== Function Prototypes ====================
-void refreshHeaderClock();
-void saveSettingsToEEPROM();
-void loadSettingsFromEEPROM();
-void applyFanSettings();
-void applyUpdateRate();
-void applyDarkMode();
-void drawButton(ButtonRegion& btn, uint16_t bgColor, uint16_t textColor,
-                const char* label, bool pressed=false, bool enabled=true);
-void updateLockButton();
-bool touchInButton(int16_t x, int16_t y, const ButtonRegion& btn);
-void drawMainScreen();
-void drawSettingsPanel();
-void drawKeypadPanel();
-void drawScriptPage();
-void drawEditPage();
-void drawScriptLoadPage();
-void drawEditSavePage();
-void drawDateTimePanel();
-void drawDeleteConfirmDialog();
-void drawAboutPage();
+// ==================== EEPROM Memory Map ====================
+#define EEPROM_FAN_ON_ADDR     8
+#define EEPROM_FAN_SPEED_ADDR  12
+#define EEPROM_UPDATE_RATE_ADDR 16
+#define EEPROM_TIME_FORMAT_ADDR 20
+#define EEPROM_DARK_MODE_ADDR  24
+#define EEPROM_NETWORK_CONFIG_ADDR 28
+#define EEPROM_SORT_MODE_ADDR  60
 
+// Date/time editing
+tmElements_t tmSet;
+
+// ==================== Function Prototypes ====================
+// System initialization
+void initializeEEPROM();
+void initRTC();
+void initNetworkBackground();
+void updateNetworkInit();
+
+// Network functions
+void handleNetworkCommunication();
+void handleTCPClients();
+void handleUDPCommunication();
+void processNetworkCommand(String command, Print* responseOutput);
+void sendLiveDataStream();
+void sendHeartbeat();
+void checkNetworkStatus();
+void saveNetworkConfig();
+void loadNetworkConfig();
+void saveNetworkFieldToConfig(int fieldIndex, const char* value);
+void loadNetworkFieldsFromConfig();
+bool generateLiveDataJSON(char* buffer, size_t bufferSize);
+bool generateStatusJSON(char* buffer, size_t bufferSize);
+bool generateScriptListJSON(char* buffer, size_t bufferSize);
+void sendResponse(const char* response, Print* output);
+
+// Data acquisition and logging
 void updateSensorData();
 void updateDisplayElements();
+void recordDataDirect();
+void startRecording(bool scriptRequested=false);
+void stopRecording();
 
-// SD Card context management
+// SD card management
 void ensureExternalSDContext();
 void ensureInternalSDContext();
-
-void recordDataDirect();
-
-// FIXED: Smart SD card check functions
 void smartCheckSDCard();
 void checkInternalSD();
 
-// Scripting & Timed Events
+// Script system
 void handleScripts();
 void startScript();
 void pauseScript();
@@ -472,10 +492,38 @@ void createNewScript();
 bool loadAllScriptNames();
 void sortScripts();
 void deleteScript(const char* scriptName);
+void updateScriptLastUsed(const char* scriptName);
+void generateScriptFilename(char* buf, size_t buflen, const char* scriptName);
+void syncSwitchesToOutputs();
+
+// GUI and display
+void drawButton(ButtonRegion& btn, uint16_t bgColor, uint16_t textColor,
+                const char* label, bool pressed=false, bool enabled=true);
+void drawMainScreen();
+void drawSettingsPanel();
+void drawNetworkPanel();
+void drawNetworkEditPanel();
+void drawKeypadPanel();
+void drawScriptPage();
+void drawEditPage();
+void drawScriptLoadPage();
+void drawEditSavePage();
+void drawDateTimePanel();
+void drawDeleteConfirmDialog();
+void drawAboutPage();
+void drawInitializationScreen();
+void updateInitializationScreen();
+void drawDeviceRow(int row);
+void drawTotalRow();
+void updateLiveValueRow(int row);
+void refreshHeaderClock();
+void updateLockButton();
 
 // Touch handling
 void handleTouchMain(int16_t x, int16_t y);
 void handleTouchSettings(int16_t x, int16_t y);
+void handleTouchNetwork(int16_t x, int16_t y);
+void handleTouchNetworkEdit(int16_t x, int16_t y);
 void handleTouchKeypad(int16_t x, int16_t y);
 void handleTouchScript(int16_t x, int16_t y);
 void handleTouchEdit(int16_t x, int16_t y);
@@ -486,134 +534,259 @@ void handleTouchDateTime(int16_t x, int16_t y);
 void handleTouchEditName(int16_t x, int16_t y);
 void handleTouchDeleteConfirm(int16_t x, int16_t y);
 void handleTouchAbout(int16_t x, int16_t y);
-
 void handleUniversalBackButton();
 
-// Helpers
-int getInaIndexForSwitch(int switchIdx);
-void drawDeviceRow(int row);
-void drawTotalRow();
-void updateLiveValueRow(int row);
-void setAllOutputsOff();
-void syncOutputsToSwitches();
-void serialPrint(String message);
+// Settings and EEPROM
+void saveSettingsToEEPROM();
+void loadSettingsFromEEPROM();
+void applyFanSettings();
+void applyUpdateRate();
+void applyDarkMode();
+
+// Serial communication
 void processSerialCommands();
 void handleCommand(String command);
 void setOutputState(String deviceName, bool state);
-int findSwitchIndex(String deviceName);
 void printCurrentStatus();
 void printHelp();
+void serialPrint(String message);
+
+// Input handling
+void handleKeypadInput(char key);
+
+// Utility functions
+int getInaIndexForSwitch(int switchIdx);
+int findSwitchIndex(String deviceName);
+void setAllOutputsOff();
+void syncOutputsToSwitches();
 void nextAvailableFilename(char* buf, size_t buflen);
-void startRecording(bool scriptRequested=false);
-void stopRecording();
+bool touchInButton(int16_t x, int16_t y, const ButtonRegion& btn);
+time_t getTeensyTime();
+void setDateTime(tmElements_t tm);
 String getCurrentTimeString();
 String formatTimeHHMMSS(time_t t);
 String formatDateString(time_t t);
 String formatShortDateTime(time_t t);
-void initRTC();
-time_t getTeensyTime();
-void setDateTime(tmElements_t tm);
-void handleKeypadInput(char key);
+IPAddress uint32ToIP(uint32_t ip);
+uint32_t ipToUint32(IPAddress ip);
+String ipToString(IPAddress ip);
 
-// FIXED: Script-based filename generation
-void generateScriptFilename(char* buf, size_t buflen, const char* scriptName);
+// ==================== Network Helper Functions ====================
 
-// FIXED: Switch state synchronization after script
-void syncSwitchesToOutputs();
-
-// ==================== Network Function Prototypes ====================
-void initNetwork();
-void handleNetworkCommunication();
-void handleTCPClients();
-void handleUDPCommunication();
-void sendLiveDataStream();
-void processNetworkCommand(String command, Print* responseOutput);
-void sendHeartbeat();
-void checkNetworkStatus();
-void saveNetworkConfig();
-void loadNetworkConfig();
-bool generateLiveDataJSON(char* buffer, size_t bufferSize);
-bool generateStatusJSON(char* buffer, size_t bufferSize);
-bool generateScriptListJSON(char* buffer, size_t bufferSize);
-void sendResponse(const char* response, Print* output);
-void networkPrint(const char* message);
-
-// ==================== MOVED: Helper functions to convert between uint32_t and IPAddress ====================
+/**
+ * @brief Convert 32-bit integer to IPAddress object
+ * @param ip 32-bit representation of IP address
+ * @return IPAddress object
+ */
 IPAddress uint32ToIP(uint32_t ip) {
   return IPAddress((ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
 }
 
+/**
+ * @brief Convert IPAddress object to 32-bit integer
+ * @param ip IPAddress object
+ * @return 32-bit representation of IP address
+ */
 uint32_t ipToUint32(IPAddress ip) {
   return ((uint32_t)ip[0] << 24) | ((uint32_t)ip[1] << 16) | ((uint32_t)ip[2] << 8) | (uint32_t)ip[3];
 }
 
-// Helper function to convert IPAddress to String - FIXED: NativeEthernet doesn't have toString()
+/**
+ * @brief Convert IPAddress to string representation
+ * @param ip IPAddress object
+ * @return String in dotted decimal notation
+ */
 String ipToString(IPAddress ip) {
   return String(ip[0]) + "." + String(ip[1]) + "." + String(ip[2]) + "." + String(ip[3]);
 }
 
-// ==================== SD Card Context Management ====================
+// ==================== EEPROM Management ====================
 
-void ensureExternalSDContext() {
-  if (currentSDContext != false) {
-    SD.begin(SD_CS);
-    currentSDContext = false;
-//    Serial.println("Switched to external SD context");
+/**
+ * @brief Initialize EEPROM with default values if not previously configured
+ */
+void initializeEEPROM() {
+  uint32_t magic;
+  uint32_t version;
+
+  EEPROM.get(EEPROM_MAGIC_ADDR, magic);
+  EEPROM.get(EEPROM_VERSION_ADDR, version);
+
+  if (magic != EEPROM_MAGIC_NUMBER || version != EEPROM_VERSION_NUMBER) {
+    Serial.println("Initializing EEPROM with default values...");
+
+    // Set validation markers
+    EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_NUMBER);
+    EEPROM.put(EEPROM_VERSION_ADDR, EEPROM_VERSION_NUMBER);
+
+    // Initialize default system settings
+    fanOn = false;
+    fanSpeed = 255;
+    updateRate = 100;
+    use24HourFormat = true;
+    darkMode = true;
+
+    // Initialize network configuration
+    networkConfig.enableEthernet = true;
+    networkConfig.useDHCP = true;
+    networkConfig.staticIP = 0xC0A80164;
+    networkConfig.subnet = 0xFFFFFF00;
+    networkConfig.gateway = 0xC0A80101;
+    networkConfig.dns = 0x08080808;
+    networkConfig.tcpPort = 8080;
+    networkConfig.udpPort = 8081;
+    networkConfig.udpTargetIP = 0xFFFFFFFF;
+    networkConfig.udpTargetPort = 8082;
+    networkConfig.networkTimeout = 10000;
+    networkConfig.dhcpTimeout = 8000;
+
+    saveSettingsToEEPROM();
+    saveNetworkConfig();
+
+    Serial.println("EEPROM initialized with default values");
+  } else {
+    Serial.println("EEPROM already initialized, loading settings...");
+    loadSettingsFromEEPROM();
+    loadNetworkConfig();
   }
 }
 
-void ensureInternalSDContext() {
-  if (currentSDContext != true) {
-    SD.begin(BUILTIN_SDCARD);
-    currentSDContext = true;
-//    Serial.println("Switched to internal SD context");
+/**
+ * @brief Save current settings to EEPROM
+ */
+void saveSettingsToEEPROM() {
+  EEPROM.put(EEPROM_FAN_ON_ADDR, fanOn);
+  EEPROM.put(EEPROM_FAN_SPEED_ADDR, fanSpeed);
+  EEPROM.put(EEPROM_UPDATE_RATE_ADDR, updateRate);
+  EEPROM.put(EEPROM_TIME_FORMAT_ADDR, use24HourFormat);
+  EEPROM.put(EEPROM_DARK_MODE_ADDR, darkMode);
+  EEPROM.put(EEPROM_SORT_MODE_ADDR, (int)currentSortMode);
+}
+
+/**
+ * @brief Load settings from EEPROM with validation
+ */
+void loadSettingsFromEEPROM() {
+  EEPROM.get(EEPROM_FAN_ON_ADDR, fanOn);
+  EEPROM.get(EEPROM_FAN_SPEED_ADDR, fanSpeed);
+  EEPROM.get(EEPROM_UPDATE_RATE_ADDR, updateRate);
+  EEPROM.get(EEPROM_TIME_FORMAT_ADDR, use24HourFormat);
+  EEPROM.get(EEPROM_DARK_MODE_ADDR, darkMode);
+
+  // Load and validate sort mode
+  int sortMode;
+  EEPROM.get(EEPROM_SORT_MODE_ADDR, sortMode);
+  if (sortMode >= 0 && sortMode <= 2) {
+    currentSortMode = (SortMode)sortMode;
+  } else {
+    currentSortMode = SORT_NAME;
   }
+
+  // Validate loaded values
+  if (fanSpeed < 0 || fanSpeed > 255) fanSpeed = 255;
+  if (updateRate < 10 || updateRate > 5000) updateRate = 100;
 }
 
 // ==================== Network Implementation ====================
 
-void initNetwork() {
+/**
+ * @brief Initialize network hardware in non-blocking mode
+ */
+void initNetworkBackground() {
   if (!networkConfig.enableEthernet) {
+    Serial.println("Ethernet disabled in settings");
+    networkInitialized = false;
+    ethernetConnected = false;
+    networkInitState = NET_FAILED;
+    return;
+  }
+
+  Serial.println("Initializing Ethernet...");
+  networkInitState = NET_CHECKING_LINK;
+  networkInitStartTime = millis();
+
+  if (!Ethernet.begin()) {
+    Serial.println("Failed to initialize Ethernet hardware");
+    networkInitState = NET_FAILED;
+    ethernetConnected = false;
+    networkInitialized = false;
+    return;
+  }
+
+  networkInitState = NET_INITIALIZING;
+}
+
+/**
+ * @brief Update network initialization state machine
+ */
+void updateNetworkInit() {
+  if (networkInitState != NET_CHECKING_LINK && networkInitState != NET_INITIALIZING && networkInitState != NET_DHCP_WAIT) return;
+
+  // Check for initialization timeout
+  if (millis() - networkInitStartTime > networkConfig.networkTimeout) {
+    Serial.println("Network initialization timed out");
+    networkInitState = NET_FAILED;
     networkInitialized = false;
     ethernetConnected = false;
     return;
   }
 
-  // Initialize Ethernet with MAC address
-  byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
-
-  Serial.println("Initializing Ethernet...");
-
-  if (networkConfig.useDHCP) {
-    if (Ethernet.begin(mac) == 0) {
-      Serial.println("Failed to configure Ethernet using DHCP");
-      ethernetConnected = false;
+  // Check physical link status
+  if (networkInitState == NET_CHECKING_LINK) {
+    if (Ethernet.linkStatus() == LinkOFF) {
+      Serial.println("No ethernet cable detected");
+      networkInitState = NET_FAILED;
       networkInitialized = false;
+      ethernetConnected = false;
       return;
     }
-  } else {
-    Ethernet.begin(mac, uint32ToIP(networkConfig.staticIP), uint32ToIP(networkConfig.dns),
-                   uint32ToIP(networkConfig.gateway), uint32ToIP(networkConfig.subnet));
+    networkInitState = NET_INITIALIZING;
   }
 
-  // Update server port if changed
-  tcpServer = EthernetServer(networkConfig.tcpPort);
-  tcpServer.begin();
+  // Configure network parameters
+  if (networkInitState == NET_INITIALIZING) {
+    if (networkConfig.useDHCP) {
+      Serial.println("Starting DHCP...");
+      networkInitState = NET_DHCP_WAIT;
+    } else {
+      Serial.println("Using static IP configuration...");
+      Ethernet.begin(uint32ToIP(networkConfig.staticIP), uint32ToIP(networkConfig.subnet), uint32ToIP(networkConfig.gateway));
+      Ethernet.setDNSServerIP(uint32ToIP(networkConfig.dns));
+      networkInitState = NET_INITIALIZED;
+    }
+  }
 
-  // Start UDP
-  udp.begin(networkConfig.udpPort);
+  // Monitor DHCP acquisition
+  if (networkInitState == NET_DHCP_WAIT) {
+    if (Ethernet.localIP() != INADDR_NONE) {
+      networkInitState = NET_INITIALIZED;
+    } else if (millis() - networkInitStartTime > networkConfig.dhcpTimeout) {
+      Serial.println("DHCP timeout, falling back to static IP");
+      Ethernet.begin(uint32ToIP(networkConfig.staticIP), uint32ToIP(networkConfig.subnet), uint32ToIP(networkConfig.gateway));
+      Ethernet.setDNSServerIP(uint32ToIP(networkConfig.dns));
+      networkInitState = NET_INITIALIZED;
+    }
+  }
 
-  ethernetConnected = true;
-  networkInitialized = true;
+  // Complete initialization
+  if (networkInitState == NET_INITIALIZED) {
+    tcpServer.begin(networkConfig.tcpPort);
+    udp.begin(networkConfig.udpPort);
+    ethernetConnected = true;
+    networkInitialized = true;
 
-  Serial.print("Ethernet initialized. IP: ");
-  Serial.println(ipToString(Ethernet.localIP()));
-  Serial.print("TCP Server listening on port: ");
-  Serial.println(networkConfig.tcpPort);
-  Serial.print("UDP listening on port: ");
-  Serial.println(networkConfig.udpPort);
+    Serial.print("Ethernet initialized. IP: ");
+    Serial.println(ipToString(Ethernet.localIP()));
+    Serial.print("TCP Server listening on port: ");
+    Serial.println(networkConfig.tcpPort);
+    Serial.print("UDP listening on port: ");
+    Serial.println(networkConfig.udpPort);
+  }
 }
 
+/**
+ * @brief Monitor network connection status
+ */
 void checkNetworkStatus() {
   if (!networkConfig.enableEthernet || !networkInitialized) return;
 
@@ -622,7 +795,6 @@ void checkNetworkStatus() {
 
   lastNetworkCheck = currentMillis;
 
-  // Check if Ethernet hardware is connected
   if (Ethernet.linkStatus() == LinkOFF) {
     if (ethernetConnected) {
       Serial.println("Ethernet cable disconnected");
@@ -633,35 +805,41 @@ void checkNetworkStatus() {
 
   if (!ethernetConnected) {
     Serial.println("Ethernet cable connected - reinitializing...");
-    initNetwork();
+    initNetworkBackground();
   }
 }
 
+/**
+ * @brief Handle all network communication tasks
+ */
 void handleNetworkCommunication() {
   if (!networkInitialized || !ethernetConnected) return;
 
   handleTCPClients();
   handleUDPCommunication();
 
-  // Send heartbeat
+  // Send periodic heartbeat
   if (heartbeatEnabled && (millis() - lastHeartbeat >= HEARTBEAT_INTERVAL)) {
     sendHeartbeat();
     lastHeartbeat = millis();
   }
 }
 
+/**
+ * @brief Handle TCP client connections and data
+ */
 void handleTCPClients() {
-  // Accept new connections
-  EthernetClient newClient = tcpServer.available();
+  // Accept new client connections
+  EthernetClient newClient = tcpServer.accept();
   if (newClient) {
-    // Find an empty slot
+    // Find available slot for new client
     for (int i = 0; i < 5; i++) {
       if (!tcpClients[i] || !tcpClients[i].connected()) {
         tcpClients[i] = newClient;
         Serial.print("New TCP client connected: ");
         Serial.println(ipToString(newClient.remoteIP()));
 
-        // Send welcome message - FIXED: Use JsonDocument
+        // Send connection acknowledgment
         JsonDocument welcomeDoc;
         welcomeDoc["type"] = "connection";
         welcomeDoc["status"] = "connected";
@@ -674,7 +852,7 @@ void handleTCPClients() {
     }
   }
 
-  // Handle existing connections
+  // Process data from existing clients
   for (int i = 0; i < 5; i++) {
     if (tcpClients[i] && tcpClients[i].connected()) {
       while (tcpClients[i].available()) {
@@ -686,7 +864,7 @@ void handleTCPClients() {
           }
         } else {
           networkCommandBuffer += c;
-          if (networkCommandBuffer.length() > 512) { // Prevent buffer overflow
+          if (networkCommandBuffer.length() > 512) {
             networkCommandBuffer = "";
           }
         }
@@ -695,6 +873,9 @@ void handleTCPClients() {
   }
 }
 
+/**
+ * @brief Handle UDP packet communication
+ */
 void handleUDPCommunication() {
   int packetSize = udp.parsePacket();
   if (packetSize) {
@@ -705,36 +886,43 @@ void handleUDPCommunication() {
       String command = String(packetBuffer);
       command.trim();
 
-      // Process UDP command and send response back to sender
-      udp.beginPacket(udp.remoteIP(), udp.remotePort());
+      // Store sender information for response
+      IPAddress remoteIP = udp.remoteIP();
+      uint16_t remotePort = udp.remotePort();
+
+      // Send response back to sender
+      udp.beginPacket(remoteIP, remotePort);
       processNetworkCommand(command, &udp);
       udp.endPacket();
     }
   }
 }
 
+/**
+ * @brief Process network commands (JSON format)
+ * @param command Command string to process
+ * @param responseOutput Output stream for response
+ */
 void processNetworkCommand(String command, Print* responseOutput) {
   command.trim();
 
-  // Parse JSON command - FIXED: Use JsonDocument
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, command);
 
   if (error) {
-    // Try processing as simple text command for backward compatibility
+    // Fall back to legacy text commands
     handleCommand(command);
     return;
   }
 
   String cmd = doc["cmd"].as<String>();
 
-  // Device Control Commands
+  // Device control commands
   if (cmd == "set_output") {
     String device = doc["device"].as<String>();
     bool state = doc["state"].as<bool>();
     setOutputState(device, state);
 
-    // FIXED: Use JsonDocument
     JsonDocument response;
     response["type"] = "command_response";
     response["cmd"] = "set_output";
@@ -762,7 +950,6 @@ void processNetworkCommand(String command, Print* responseOutput) {
       setAllOutputsOff();
     }
 
-    // FIXED: Use JsonDocument
     JsonDocument response;
     response["type"] = "command_response";
     response["cmd"] = "all_outputs";
@@ -771,8 +958,7 @@ void processNetworkCommand(String command, Print* responseOutput) {
     serializeJson(response, *responseOutput);
     responseOutput->println();
   }
-
-  // System Control Commands
+  // System control commands
   else if (cmd == "lock") {
     bool lockState = doc["state"].as<bool>();
     bool prevLock = lock;
@@ -780,7 +966,6 @@ void processNetworkCommand(String command, Print* responseOutput) {
     updateLockButton();
     if (!lock && prevLock) syncOutputsToSwitches();
 
-    // FIXED: Use JsonDocument
     JsonDocument response;
     response["type"] = "command_response";
     response["cmd"] = "lock";
@@ -804,7 +989,6 @@ void processNetworkCommand(String command, Print* responseOutput) {
       if (!lock && prevLock) syncOutputsToSwitches();
     }
 
-    // FIXED: Use JsonDocument
     JsonDocument response;
     response["type"] = "command_response";
     response["cmd"] = "safety_stop";
@@ -813,6 +997,7 @@ void processNetworkCommand(String command, Print* responseOutput) {
     serializeJson(response, *responseOutput);
     responseOutput->println();
   }
+  // Recording control
   else if (cmd == "start_recording") {
     if (!recording) {
       startRecording(false);
@@ -829,13 +1014,11 @@ void processNetworkCommand(String command, Print* responseOutput) {
       sendResponse("{\"type\":\"error\",\"message\":\"Not currently recording\"}", responseOutput);
     }
   }
-
-  // Script Control Commands
+  // Script control
   else if (cmd == "load_script") {
     String scriptName = doc["name"].as<String>();
     loadScriptFromFile((scriptName + ".json").c_str());
 
-    // FIXED: Use JsonDocument
     JsonDocument response;
     response["type"] = "command_response";
     response["cmd"] = "load_script";
@@ -868,16 +1051,15 @@ void processNetworkCommand(String command, Print* responseOutput) {
       sendResponse("{\"type\":\"error\",\"message\":\"No script running\"}", responseOutput);
     }
   }
-
-  // Settings Commands
+  // Settings control
   else if (cmd == "set_fan_speed") {
     int speed = doc["value"].as<int>();
     speed = constrain(speed, 0, 255);
     fanSpeed = speed;
+    fanOn = (speed > 0);
     saveSettingsToEEPROM();
     applyFanSettings();
 
-    // FIXED: Use JsonDocument
     JsonDocument response;
     response["type"] = "command_response";
     response["cmd"] = "set_fan_speed";
@@ -888,11 +1070,10 @@ void processNetworkCommand(String command, Print* responseOutput) {
   }
   else if (cmd == "set_update_rate") {
     unsigned long rate = doc["value"].as<unsigned long>();
-    rate = constrain(rate, 10UL, 5000UL); // FIXED: Use UL for unsigned literals
+    rate = constrain(rate, 10UL, 5000UL);
     updateRate = rate;
     saveSettingsToEEPROM();
 
-    // FIXED: Use JsonDocument
     JsonDocument response;
     response["type"] = "command_response";
     response["cmd"] = "set_update_rate";
@@ -901,8 +1082,7 @@ void processNetworkCommand(String command, Print* responseOutput) {
     serializeJson(response, *responseOutput);
     responseOutput->println();
   }
-
-  // Data Request Commands
+  // Data requests
   else if (cmd == "get_status") {
     if (generateStatusJSON(responseBuffer, sizeof(responseBuffer))) {
       responseOutput->println(responseBuffer);
@@ -919,12 +1099,35 @@ void processNetworkCommand(String command, Print* responseOutput) {
     if (interval > 5000) interval = 5000;
 
     streamConfig.streamInterval = interval;
-    streamConfig.usbStreamEnabled = (responseOutput == &Serial);
-    streamConfig.tcpStreamEnabled = true;
-    streamConfig.udpStreamEnabled = false;
+
+    // Configure UDP target if specified
+    if (!doc["udp_target_ip"].isNull()) {
+      String targetIP = doc["udp_target_ip"].as<String>();
+      IPAddress ip;
+      if (ip.fromString(targetIP)) {
+        networkConfig.udpTargetIP = ipToUint32(ip);
+      }
+    }
+    if (!doc["udp_target_port"].isNull()) {
+      networkConfig.udpTargetPort = doc["udp_target_port"].as<uint16_t>();
+    }
+
+    // Configure stream type based on output interface
+    if (responseOutput == &Serial) {
+      streamConfig.usbStreamEnabled = true;
+      streamConfig.tcpStreamEnabled = false;
+      streamConfig.udpStreamEnabled = false;
+    } else if (responseOutput == &udp) {
+      streamConfig.usbStreamEnabled = false;
+      streamConfig.tcpStreamEnabled = false;
+      streamConfig.udpStreamEnabled = true;
+    } else {
+      streamConfig.usbStreamEnabled = false;
+      streamConfig.tcpStreamEnabled = true;
+      streamConfig.udpStreamEnabled = false;
+    }
     streamingActive = true;
 
-    // FIXED: Use JsonDocument
     JsonDocument response;
     response["type"] = "command_response";
     response["cmd"] = "start_stream";
@@ -946,6 +1149,9 @@ void processNetworkCommand(String command, Print* responseOutput) {
   }
 }
 
+/**
+ * @brief Send live data stream to configured outputs
+ */
 void sendLiveDataStream() {
   if (!generateLiveDataJSON(responseBuffer, sizeof(responseBuffer))) return;
 
@@ -963,15 +1169,21 @@ void sendLiveDataStream() {
     }
   }
 
-  // Send to UDP if enabled (would need to store client addresses)
-  if (streamConfig.udpStreamEnabled) {
-    // UDP streaming would require storing client addresses
-    // This could be implemented if needed
+  // Send to UDP if enabled
+  if (streamConfig.udpStreamEnabled && networkInitialized) {
+    udp.beginPacket(uint32ToIP(networkConfig.udpTargetIP), networkConfig.udpTargetPort);
+    udp.print(responseBuffer);
+    udp.endPacket();
   }
 }
 
+/**
+ * @brief Generate JSON formatted live data
+ * @param buffer Output buffer for JSON data
+ * @param bufferSize Size of output buffer
+ * @return true if successful, false if buffer too small
+ */
 bool generateLiveDataJSON(char* buffer, size_t bufferSize) {
-  // FIXED: Use JsonDocument
   JsonDocument doc;
 
   doc["type"] = "live_data";
@@ -992,7 +1204,7 @@ bool generateLiveDataJSON(char* buffer, size_t bufferSize) {
     int inaIdx = getInaIndexForSwitch(i);
     if (inaIdx >= 0) {
       device["voltage"] = deviceVoltage[inaIdx];
-      device["current"] = deviceCurrent[inaIdx];
+      device["current"] = deviceCurrent[inaIdx] / 1000.0;
       device["power"] = devicePower[inaIdx];
     } else {
       device["voltage"] = 0.0;
@@ -1001,22 +1213,25 @@ bool generateLiveDataJSON(char* buffer, size_t bufferSize) {
     }
   }
 
-  // Add total power
+  // Add bus totals
   JsonObject total = devices.add<JsonObject>();
-  total["name"] = "Total";
+  total["name"] = "Bus";
   total["state"] = false;
-  if (numIna > 6) {
-    total["voltage"] = deviceVoltage[6];
-    total["current"] = deviceCurrent[6];
-    total["power"] = devicePower[6];
-  }
+  total["voltage"] = deviceVoltage[6];
+  total["current"] = deviceCurrent[6] / 1000.0;
+  total["power"] = devicePower[6];
 
   size_t len = serializeJson(doc, buffer, bufferSize);
   return (len > 0 && len < bufferSize);
 }
 
+/**
+ * @brief Generate JSON formatted system status
+ * @param buffer Output buffer for JSON data
+ * @param bufferSize Size of output buffer
+ * @return true if successful, false if buffer too small
+ */
 bool generateStatusJSON(char* buffer, size_t bufferSize) {
-  // FIXED: Use JsonDocument
   JsonDocument doc;
 
   doc["type"] = "status";
@@ -1038,7 +1253,7 @@ bool generateStatusJSON(char* buffer, size_t bufferSize) {
   doc["stream_interval"] = streamConfig.streamInterval;
 
   if (ethernetConnected) {
-    doc["ip_address"] = ipToString(Ethernet.localIP()); // FIXED: Use custom ipToString function
+    doc["ip_address"] = ipToString(Ethernet.localIP());
     doc["tcp_port"] = networkConfig.tcpPort;
     doc["udp_port"] = networkConfig.udpPort;
   }
@@ -1047,8 +1262,13 @@ bool generateStatusJSON(char* buffer, size_t bufferSize) {
   return (len > 0 && len < bufferSize);
 }
 
+/**
+ * @brief Generate JSON formatted script list
+ * @param buffer Output buffer for JSON data
+ * @param bufferSize Size of output buffer
+ * @return true if successful, false if buffer too small
+ */
 bool generateScriptListJSON(char* buffer, size_t bufferSize) {
-  // FIXED: Use JsonDocument
   JsonDocument doc;
 
   doc["type"] = "script_list";
@@ -1067,14 +1287,15 @@ bool generateScriptListJSON(char* buffer, size_t bufferSize) {
   return (len > 0 && len < bufferSize);
 }
 
+/**
+ * @brief Send heartbeat to all connected TCP clients
+ */
 void sendHeartbeat() {
-  // FIXED: Use JsonDocument
   JsonDocument doc;
   doc["type"] = "heartbeat";
   doc["timestamp"] = getCurrentTimeString();
   doc["uptime"] = millis();
 
-  // Send to all connected TCP clients
   for (int i = 0; i < 5; i++) {
     if (tcpClients[i] && tcpClients[i].connected()) {
       serializeJson(doc, tcpClients[i]);
@@ -1083,32 +1304,170 @@ void sendHeartbeat() {
   }
 }
 
+/**
+ * @brief Send response string to output
+ * @param response Response string to send
+ * @param output Output stream
+ */
 void sendResponse(const char* response, Print* output) {
   output->println(response);
 }
 
+/**
+ * @brief Save network configuration to EEPROM
+ */
 void saveNetworkConfig() {
   EEPROM.put(EEPROM_NETWORK_CONFIG_ADDR, networkConfig);
 }
 
+/**
+ * @brief Load network configuration from EEPROM with validation
+ */
 void loadNetworkConfig() {
   NetworkConfig defaultConfig;
   EEPROM.get(EEPROM_NETWORK_CONFIG_ADDR, networkConfig);
 
-  // Validate loaded config
+  // Validate loaded configuration
   if (networkConfig.tcpPort < 1024 || networkConfig.tcpPort > 65535) {
     networkConfig.tcpPort = defaultConfig.tcpPort;
   }
   if (networkConfig.udpPort < 1024 || networkConfig.udpPort > 65535) {
     networkConfig.udpPort = defaultConfig.udpPort;
   }
+  if (networkConfig.networkTimeout < 1000 || networkConfig.networkTimeout > 30000) {
+    networkConfig.networkTimeout = defaultConfig.networkTimeout;
+  }
+  if (networkConfig.dhcpTimeout < 1000 || networkConfig.dhcpTimeout > 20000) {
+    networkConfig.dhcpTimeout = defaultConfig.dhcpTimeout;
+  }
 }
 
-// ==================== FIXED: Smart SD Card Check Functions ====================
+/**
+ * @brief Save network field to configuration
+ * @param fieldIndex Index of field to save
+ * @param value String value to save
+ */
+void saveNetworkFieldToConfig(int fieldIndex, const char* value) {
+  switch (fieldIndex) {
+    case 0: { // Static IP
+      IPAddress ip;
+      if (ip.fromString(value)) {
+        networkConfig.staticIP = ipToUint32(ip);
+      }
+      break;
+    }
+    case 1: { // Subnet
+      IPAddress ip;
+      if (ip.fromString(value)) {
+        networkConfig.subnet = ipToUint32(ip);
+      }
+      break;
+    }
+    case 2: { // Gateway
+      IPAddress ip;
+      if (ip.fromString(value)) {
+        networkConfig.gateway = ipToUint32(ip);
+      }
+      break;
+    }
+    case 3: { // DNS
+      IPAddress ip;
+      if (ip.fromString(value)) {
+        networkConfig.dns = ipToUint32(ip);
+      }
+      break;
+    }
+    case 4: { // TCP Port
+      int port = atoi(value);
+      if (port >= 1024 && port <= 65535) {
+        networkConfig.tcpPort = port;
+      }
+      break;
+    }
+    case 5: { // UDP Port
+      int port = atoi(value);
+      if (port >= 1024 && port <= 65535) {
+        networkConfig.udpPort = port;
+      }
+      break;
+    }
+    case 6: { // Network Timeout
+      unsigned long timeout = atol(value);
+      if (timeout >= 1000 && timeout <= 30000) {
+        networkConfig.networkTimeout = timeout;
+      }
+      break;
+    }
+    case 7: { // DHCP Timeout
+      unsigned long timeout = atol(value);
+      if (timeout >= 1000 && timeout <= 20000) {
+        networkConfig.dhcpTimeout = timeout;
+      }
+      break;
+    }
+  }
+}
 
+/**
+ * @brief Load network configuration into edit fields
+ */
+void loadNetworkFieldsFromConfig() {
+  numNetworkFields = 0;
+
+  // Configure edit fields with current network settings
+  struct FieldConfig {
+    int x, y, w, h, type;
+    const char* configValue;
+  };
+
+  FieldConfig fields[] = {
+    {200, 80, 120, 25, 0, ipToString(uint32ToIP(networkConfig.staticIP)).c_str()},
+    {200, 110, 120, 25, 0, ipToString(uint32ToIP(networkConfig.subnet)).c_str()},
+    {200, 140, 120, 25, 0, ipToString(uint32ToIP(networkConfig.gateway)).c_str()},
+    {200, 170, 120, 25, 0, ipToString(uint32ToIP(networkConfig.dns)).c_str()},
+    {200, 200, 80, 25, 1, String(networkConfig.tcpPort).c_str()},
+    {200, 230, 80, 25, 1, String(networkConfig.udpPort).c_str()},
+    {200, 260, 80, 25, 2, String(networkConfig.networkTimeout).c_str()},
+    {340, 260, 80, 25, 2, String(networkConfig.dhcpTimeout).c_str()}
+  };
+
+  for (int i = 0; i < 8; i++) {
+    networkFields[numNetworkFields].x = fields[i].x;
+    networkFields[numNetworkFields].y = fields[i].y;
+    networkFields[numNetworkFields].w = fields[i].w;
+    networkFields[numNetworkFields].h = fields[i].h;
+    networkFields[numNetworkFields].fieldType = fields[i].type;
+    strcpy(networkFields[numNetworkFields].value, fields[i].configValue);
+    numNetworkFields++;
+  }
+}
+
+// ==================== SD Card Management ====================
+
+/**
+ * @brief Ensure external SD card context is active
+ */
+void ensureExternalSDContext() {
+  if (currentSDContext != false) {
+    SD.begin(SD_CS);
+    currentSDContext = false;
+  }
+}
+
+/**
+ * @brief Ensure internal SD card context is active
+ */
+void ensureInternalSDContext() {
+  if (currentSDContext != true) {
+    SD.begin(BUILTIN_SDCARD);
+    currentSDContext = true;
+  }
+}
+
+/**
+ * @brief Check external SD card availability and update UI
+ */
 void smartCheckSDCard() {
-//  Serial.println("Smart SD card check initiated...");
-
   ensureExternalSDContext();
 
   bool nowAvailable = false;
@@ -1117,12 +1476,7 @@ void smartCheckSDCard() {
     if (root) {
       nowAvailable = true;
       root.close();
-//      Serial.println("External SD card: Available");
-    } else {
-//      Serial.println("External SD card: Cannot access root directory");
     }
-  } else {
-//    Serial.println("External SD card: Cannot initialize");
   }
 
   sdAvailable = nowAvailable;
@@ -1143,11 +1497,11 @@ void smartCheckSDCard() {
                false,
                true);
   }
-
-//  Serial.print("SD card status updated: ");
-//  Serial.println(sdAvailable ? "Available" : "Not Available");
 }
 
+/**
+ * @brief Check internal SD card availability
+ */
 void checkInternalSD() {
   if (!recording) {
     ensureInternalSDContext();
@@ -1159,13 +1513,14 @@ void checkInternalSD() {
       }
     }
     internalSdAvailable = nowAvailable;
-//    Serial.print("Internal SD card status: ");
-//    Serial.println(internalSdAvailable ? "Available" : "Not Available");
   }
 }
 
-// ==================== Optimized Main Functions ====================
+// ==================== Data Acquisition ====================
 
+/**
+ * @brief Read all INA226 sensor data
+ */
 void updateSensorData() {
   for (int i = 0; i < numIna; i++) {
     deviceVoltage[i] = inaDevices[i]->getBusVoltage();
@@ -1174,6 +1529,9 @@ void updateSensorData() {
   }
 }
 
+/**
+ * @brief Update display elements with current sensor data
+ */
 void updateDisplayElements() {
   if (currentMode == MODE_MAIN || currentMode == MODE_SCRIPT) {
     for (int i = 0; i < numSwitches; i++) {
@@ -1185,13 +1543,17 @@ void updateDisplayElements() {
   }
 }
 
-// ==================== Direct Recording Functions ====================
+// ==================== Data Logging ====================
 
+/**
+ * @brief Record sensor data to SD card
+ */
 void recordDataDirect() {
   if (!recording || !logFile) return;
 
   ensureExternalSDContext();
 
+  // Validate log file integrity
   if (!logFile.available() && logFile.size() == 0) {
     Serial.println("Log file became invalid - stopping recording");
     stopRecording();
@@ -1201,6 +1563,7 @@ void recordDataDirect() {
   unsigned long t = (millis() - recordStartMillis);
 
   if (csvOutput) {
+    // CSV format output
     logFile.print(t);
     for (int i = 0; i < numSwitches; i++) {
       int inaIdx = getInaIndexForSwitch(i);
@@ -1209,12 +1572,13 @@ void recordDataDirect() {
       logFile.print(",");
       logFile.print(inaIdx >= 0 ? deviceVoltage[inaIdx] : 0.0f, 4);
       logFile.print(",");
-      logFile.print(inaIdx >= 0 ? deviceCurrent[inaIdx] : 0.0f, 4);
+      logFile.print(inaIdx >= 0 ? (deviceCurrent[inaIdx] / 1000.0f) : 0.0f, 4);
       logFile.print(",");
       logFile.print(inaIdx >= 0 ? devicePower[inaIdx] : 0.0f, 4);
     }
     logFile.println();
   } else {
+    // JSON format output
     if (!firstDataPoint) {
       logFile.print(",\n");
     } else {
@@ -1239,7 +1603,7 @@ void recordDataDirect() {
       logFile.print(",\"");
       logFile.print(switchOutputs[i].name);
       logFile.print("_curr\":");
-      logFile.print(inaIdx >= 0 ? deviceCurrent[inaIdx] : 0.0f, 4);
+      logFile.print(inaIdx >= 0 ? (deviceCurrent[inaIdx] / 1000.0f) : 0.0f, 4);
 
       logFile.print(",\"");
       logFile.print(switchOutputs[i].name);
@@ -1254,6 +1618,7 @@ void recordDataDirect() {
     logFile.print("}");
   }
 
+  // Periodic flush to ensure data integrity
   static int flushCounter = 0;
   if (++flushCounter >= 3) {
     logFile.flush();
@@ -1261,375 +1626,176 @@ void recordDataDirect() {
   }
 }
 
-// ==================== Button Drawing Function ====================
-void drawButton(ButtonRegion& btn, uint16_t bgColor, uint16_t textColor,
-                const char* label, bool pressed, bool enabled) {
-  btn.color = bgColor;
-  btn.pressed = pressed;
-  btn.enabled = enabled;
-  uint16_t fill = !enabled ? COLOR_GRAY : (pressed ? COLOR_BTN_PRESS : bgColor);
-  tft.fillRect(btn.x, btn.y, btn.w, btn.h, fill);
-  tft.drawRect(btn.x, btn.y, btn.w, btn.h, COLOR_BLACK);
-  tft.setFont(&FreeSans9pt7b);
-  tft.setTextSize(1);
-  tft.setTextColor(textColor);
-  int16_t x1, y1;
-  uint16_t w, h;
-  tft.getTextBounds(label, btn.x, btn.y, &x1, &y1, &w, &h);
-  int tx = btn.x + (btn.w - w) / 2;
-  int ty = btn.y + (btn.h + h) / 2;
-  tft.setCursor(tx, ty);
-  tft.print(label);
-}
+/**
+ * @brief Start data recording to SD card
+ * @param scriptRequested true if recording requested by script
+ */
+void startRecording(bool scriptRequested) {
+  if (recording) return;
 
-// ==================== Setup ====================
-void setup() {
-  Serial.begin(2000000);
-  Wire.begin();
+  ensureExternalSDContext();
 
-  initRTC();
-
-  // Load network configuration
-  loadNetworkConfig();
-
-  for (int i = 0; i < numIna; i++) {
-    inaDevices[i]->begin();
-    inaDevices[i]->setMaxCurrentShunt(8, 0.01);
+  if (!SD.begin(SD_CS)) {
+    Serial.println("Cannot initialize external SD card");
+    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "NO SD", false, false);
+    delay(100);
+    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "RECORD", false, false);
+    return;
   }
 
-  for (int i = 0; i < numSwitches; i++) {
-    if (switchOutputs[i].switchPin == -1) {
-      continue;
-    }
-    pinMode(switchOutputs[i].switchPin, INPUT_PULLUP);
-    pinMode(switchOutputs[i].outputPin, OUTPUT);
-    switchOutputs[i].debouncer.attach(switchOutputs[i].switchPin);
-    switchOutputs[i].debouncer.interval(10);
+  File root = SD.open("/");
+  if (!root) {
+    Serial.println("External SD card not accessible");
+    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "SD ERR", false, false);
+    delay(100);
+    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "RECORD", false, false);
+    return;
   }
+  root.close();
 
-  for (int i = 0; i < numSwitches; i++) {
-    if (switchOutputs[i].switchPin == -1) {
-      continue;
-    }
-    int initialState = digitalRead(switchOutputs[i].switchPin);
-    if (initialState == LOW) {
-      digitalWrite(switchOutputs[i].outputPin, HIGH);
-      switchOutputs[i].state = HIGH;
-    } else {
-      digitalWrite(switchOutputs[i].outputPin, LOW);
-      switchOutputs[i].state = LOW;
-    }
-  }
-
-  pinMode(FAN_PWM_PIN, OUTPUT);
-
-  pinMode(pwrLed, OUTPUT);
-  pinMode(lockLed, OUTPUT);
-  pinMode(stopLed, OUTPUT);
-
-  digitalWrite(pwrLed, HIGH);
-  digitalWrite(lockLed, LOW);
-  digitalWrite(stopLed, LOW);
-
-  loadSettingsFromEEPROM();
-
-  tft.init(320, 480, 0, 0, ST7796S_BGR);
-  applyDarkMode();
-  tft.setRotation(1);
-  ts.begin();
-  ts.setRotation(1);
-  tft.fillScreen(COLOR_BLACK);
-
-  // FIXED: Initial smart SD card check
-  smartCheckSDCard();
-  checkInternalSD();
-
-  applyFanSettings();
-  applyUpdateRate();
-
-  createNewScript();
-  loadAllScriptNames();
-
-  // Initialize network
-  initNetwork();
-
-  drawMainScreen();
-
-  if (Serial.available()) {
-    serialAvailable = true;
-    Serial.println("Teensy 4.1 Power Controller Ready - Network Enabled");
-    Serial.println("Type 'help' for available commands");
-    if (ethernetConnected) {
-      Serial.print("Network: TCP/");
-      Serial.print(networkConfig.tcpPort);
-      Serial.print(" UDP/");
-      Serial.print(networkConfig.udpPort);
-      Serial.print(" IP: ");
-      Serial.println(ipToString(Ethernet.localIP()));
-    }
-  }
-}
-
-// ==================== FIXED: Main Loop with Smart SD Checking and Network ====================
-void loop() {
-  unsigned long currentMillis = millis();
-
-  processSerialCommands();
-
-  // Handle network communication (non-blocking)
-  handleNetworkCommunication();
-
-  // Check network status periodically
-  checkNetworkStatus();
-
-  // FIXED: Move streaming logic outside network function for USB support
-  if (streamingActive && (currentMillis - lastStreamTime >= streamConfig.streamInterval)) {
-    sendLiveDataStream();
-    lastStreamTime = currentMillis;
-  }
-
-  // FIXED: Smart SD checking - only when NOT recording
-  if (!recording && (currentMillis - lastSDCheck > SD_CHECK_INTERVAL)) {
-    smartCheckSDCard();
-    checkInternalSD();
-    lastSDCheck = currentMillis;
-  }
-
-  char key = keypad.getKey();
-  if (key == 'B') {
-    if (currentMode != MODE_KEYPAD && currentMode != MODE_EDIT_SAVE && currentMode != MODE_EDIT_NAME) {
-      handleUniversalBackButton();
-    } else {
-      handleKeypadInput(key);
-    }
-  }
-  // Handle script selection keypad with early return
-  if (currentMode == MODE_SCRIPT_LOAD && key >= '1' && key <= '9') {
-    int scriptNum = key - '0';
-    if (scriptNum <= numScripts) {
-      selectedScript = scriptNum - 1;
-      highlightedScript = scriptNum - 1;
-      scriptListOffset = max(0, (scriptNum - 1) - 5);
-      drawScriptLoadPage();
-      return; // Early return ONLY for script selection
-    }
-  }
-
-  if (recording && (currentMillis - lastPowerLedBlink >= 500)) {
-    lastPowerLedBlink = currentMillis;
-    powerLedState = !powerLedState;
-    digitalWrite(pwrLed, powerLedState ? HIGH : LOW);
-  } else if (!recording) {
-    digitalWrite(pwrLed, HIGH);
-  }
-
-  if (currentMode == MODE_KEYPAD || currentMode == MODE_EDIT_SAVE || currentMode == MODE_EDIT_NAME) {
-    if (key && key != 'B') {
-      handleKeypadInput(key);
-    }
-  }
-
-  if (currentMillis - lastSensorUpdate >= SENSOR_UPDATE_INTERVAL) {
-    updateSensorData();
-    lastSensorUpdate = currentMillis;
-  }
-
-  if (currentMillis - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
-    updateDisplayElements();
-    lastDisplayUpdate = currentMillis;
-  }
-
-  if (recording && (currentMillis - lastLogWrite >= LOG_WRITE_INTERVAL)) {
-    recordDataDirect();
-    lastLogWrite = currentMillis;
-  }
-
-  if (isScriptRunning && !isScriptPaused) {
-    handleScripts();
-
-    if (currentMillis - lastLockBlink >= 750) {
-      lastLockBlink = currentMillis;
-      lockLedState = !lockLedState;
-      digitalWrite(lockLed, lockLedState ? HIGH : LOW);
-    }
-  }
-  else {
-    digitalWrite(lockLed, lock ? HIGH : LOW);
-  }
-
-  if (currentMillis - lastClockRefresh >= 1000) {
-    lastClockRefresh = currentMillis;
-    refreshHeaderClock();
-  }
-
-  for (int i = 0; i < numSwitches; i++) {
-    switchOutputs[i].debouncer.update();
-    if (!lock && !safetyStop && !isScriptRunning) {
-      if (switchOutputs[i].debouncer.fell()) {
-        digitalWrite(switchOutputs[i].outputPin, HIGH);
-        switchOutputs[i].state = HIGH;
-        if (currentMode == MODE_MAIN) drawDeviceRow(i);
-        if (currentMode == MODE_SCRIPT) updateLiveValueRow(i);
-      }
-      else if (switchOutputs[i].debouncer.rose()) {
-        digitalWrite(switchOutputs[i].outputPin, LOW);
-        switchOutputs[i].state = LOW;
-        if (currentMode == MODE_MAIN) drawDeviceRow(i);
-        if (currentMode == MODE_SCRIPT) updateLiveValueRow(i);
-      }
-    }
-  }
-
-  if (ts.touched()) {
-    if (currentMillis - lastTouchTime > touchDebounceMs) {
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, 200, 3800, 0, SCREEN_WIDTH);
-      x = SCREEN_WIDTH - x;
-      int16_t y = map(p.y, 200, 3800, SCREEN_HEIGHT, 0);
-
-      switch(currentMode) {
-        case MODE_MAIN:
-          handleTouchMain(x, y);
-          break;
-        case MODE_SETTINGS:
-          handleTouchSettings(x, y);
-          break;
-        case MODE_SCRIPT:
-          handleTouchScript(x, y);
-          break;
-        case MODE_SCRIPT_LOAD:
-          handleTouchScriptLoad(x, y);
-          break;
-        case MODE_EDIT:
-          handleTouchEdit(x, y);
-          break;
-        case MODE_EDIT_LOAD:
-          handleTouchScriptLoad(x, y);
-          break;
-        case MODE_EDIT_FIELD:
-          handleTouchEditField(x, y);
-          break;
-        case MODE_DATE_TIME:
-          handleTouchDateTime(x, y);
-          break;
-        case MODE_EDIT_SAVE:
-          handleTouchEditSave(x,y);
-          break;
-        case MODE_EDIT_NAME:
-          handleTouchEditName(x, y);
-          break;
-        case MODE_KEYPAD:
-          handleTouchKeypad(x,y);
-          break;
-        case MODE_DELETE_CONFIRM:
-          handleTouchDeleteConfirm(x, y);
-          break;
-        case MODE_ABOUT:
-          handleTouchAbout(x, y);
-          break;
-        default:
-          break;
-      }
-      lastTouchTime = currentMillis;
-    }
-  }
-
-  digitalWrite(stopLed, safetyStop ? HIGH : LOW);
-}
-
-// ==================== Enhanced Serial Command Processing ====================
-void processSerialCommands() {
-  while (Serial.available()) {
-    char c = Serial.read();
-    if (c == '\n' || c == '\r') {
-      if (serialBuffer.length() > 0) {
-        // Try to parse as JSON first, then fall back to text commands - FIXED: Use JsonDocument
-        JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, serialBuffer);
-
-        if (!error) {
-          // Process as network command through serial
-          processNetworkCommand(serialBuffer, &Serial);
-        } else {
-          // Process as legacy text command
-          handleCommand(serialBuffer);
-        }
-        serialBuffer = "";
-      }
-    } else {
-      serialBuffer += c;
-    }
-  }
-}
-
-// ==================== teensy_remaining_functions.ino ====================
-
-// ==================== Universal Back Button Handler ====================
-void handleUniversalBackButton() {
-  switch(currentMode) {
-    case MODE_SETTINGS:
-      currentMode = MODE_MAIN;
-      drawMainScreen();
-      break;
-    case MODE_SCRIPT:
-      currentMode = MODE_MAIN;
-      drawMainScreen();
-      break;
-    case MODE_EDIT:
-      currentMode = MODE_MAIN;
-      drawMainScreen();
-      break;
-    case MODE_SCRIPT_LOAD:
-    case MODE_EDIT_LOAD:
-      currentMode = previousMode;
-      if (previousMode == MODE_SCRIPT) {
-        drawScriptPage();
-      } else {
-        drawEditPage();
-      }
-      break;
-    case MODE_DATE_TIME:
-      currentMode = MODE_SETTINGS;
-      drawSettingsPanel();
-      break;
-    case MODE_DELETE_CONFIRM:
-      currentMode = (previousMode == MODE_SCRIPT) ? MODE_SCRIPT_LOAD : MODE_EDIT_LOAD;
-      drawScriptLoadPage();
-      break;
-    case MODE_ABOUT:
-      currentMode = MODE_SETTINGS;
-      drawSettingsPanel();
-      break;
-    default:
-      break;
-  }
-}
-
-// ==================== RTC Functions ====================
-void initRTC() {
-  setSyncProvider(getTeensyTime);
-
-  if (timeStatus() != timeSet) {
-    Serial.println("Unable to sync with the RTC");
-    setTime(0, 0, 0, 1, 1, 2025);
+  // Generate appropriate filename
+  if (scriptRequested && strlen(currentScript.scriptName) > 0) {
+    generateScriptFilename(recordFilename, sizeof(recordFilename), currentScript.scriptName);
   } else {
-    Serial.println("RTC has set the system time");
+    if (csvOutput) {
+      nextAvailableFilename(recordFilename, sizeof(recordFilename));
+      strcpy(recordFilename + strlen(recordFilename) - 5, ".csv");
+    } else {
+      nextAvailableFilename(recordFilename, sizeof(recordFilename));
+    }
+  }
+
+  logFile = SD.open(recordFilename, FILE_WRITE);
+  if (!logFile) {
+    Serial.println("Failed to create log file on external SD");
+    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "SD ERR", false, false);
+    delay(100);
+    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "RECORD", false, false);
+    return;
+  }
+
+  recordingScript = scriptRequested;
+
+  // Write file header
+  if (csvOutput) {
+    logFile.print("Time");
+    for (int i = 0; i < numSwitches; i++) {
+      logFile.print(",");
+      logFile.print(switchOutputs[i].name);
+      logFile.print("_State,");
+      logFile.print(switchOutputs[i].name);
+      logFile.print("_Voltage,");
+      logFile.print(switchOutputs[i].name);
+      logFile.print("_Current,");
+      logFile.print(switchOutputs[i].name);
+      logFile.print("_Power");
+    }
+    logFile.println();
+  } else {
+    // JSON header with metadata
+    logFile.print("{\n");
+    logFile.print("\"using_script\":");
+    logFile.print(scriptRequested ? "1" : "0");
+    logFile.print(",\n");
+
+    if (scriptRequested) {
+      logFile.print("\"script_config\":{\n");
+      logFile.print("\"name\":\"");
+      logFile.print(currentScript.scriptName);
+      logFile.print("\",\n\"tstart\":");
+      logFile.print(currentScript.tStart);
+      logFile.print(",\"tend\":");
+      logFile.print(currentScript.tEnd);
+      logFile.print(",\"record\":");
+      logFile.print(currentScript.useRecord ? "true" : "false");
+      logFile.print(",\n\"devices\":[\n");
+
+      // Include device configuration
+      for (int i = 0; i < 6; i++) {
+        if (i > 0) logFile.print(",\n");
+        logFile.print("{\"name\":\"");
+        logFile.print(switchOutputs[i].name);
+        logFile.print("\",\"enabled\":");
+        logFile.print(currentScript.devices[i].enabled ? "true" : "false");
+        logFile.print(",\"onTime\":");
+        logFile.print(currentScript.devices[i].onTime);
+        logFile.print(",\"offTime\":");
+        logFile.print(currentScript.devices[i].offTime);
+        logFile.print("}");
+      }
+
+      logFile.print("\n],\n\"script_ended_early\":false");
+      logFile.print("\n},\n");
+    } else {
+      logFile.print("\"script_config\":null,\n");
+    }
+
+    time_t nowT = now();
+    logFile.print("\"timestamp\":\"");
+    logFile.print(formatTimeHHMMSS(nowT));
+    logFile.print("\",\n");
+    logFile.print("\"data\":[\n");
+  }
+
+  logFile.flush();
+
+  recording = true;
+  recordStartMillis = millis();
+  firstDataPoint = true;
+  btnRecord.label = "RECORDING";
+
+  if (currentMode == MODE_MAIN) {
+    drawButton(btnRecord, COLOR_RECORDING, COLOR_WHITE, "RECORDING", false, true);
+  }
+
+  Serial.print("Recording started: ");
+  Serial.println(recordFilename);
+}
+
+/**
+ * @brief Stop data recording and close file
+ */
+void stopRecording() {
+  if (!recording) return;
+
+  Serial.println("Stopping recording...");
+
+  ensureExternalSDContext();
+
+  recording = false;
+  bool wasScriptRecording = recordingScript;
+  recordingScript = false;
+
+  if (logFile) {
+    if (!csvOutput) {
+      long durationSec = (millis() - recordStartMillis) / 1000;
+      logFile.print("\n],\n");
+      logFile.print("\"duration_sec\":");
+      logFile.print(durationSec);
+
+      if (wasScriptRecording) {
+        logFile.print(",\n\"script_ended_early\":");
+        logFile.print(scriptEndedEarly ? "true" : "false");
+      }
+
+      logFile.print("\n}");
+    }
+    logFile.flush();
+    logFile.close();
+    Serial.println("Recording stopped and file closed successfully");
+  }
+
+  btnRecord.label = "RECORD";
+  if (currentMode == MODE_MAIN) {
+    drawButton(btnRecord, sdAvailable ? COLOR_RECORD : COLOR_GRAY, COLOR_WHITE, "RECORD", false, sdAvailable);
   }
 }
 
-time_t getTeensyTime() {
-  return Teensy3Clock.get();
-}
+// ==================== Script System ====================
 
-void setDateTime(tmElements_t tm) {
-  time_t t = makeTime(tm);
-  setTime(t);
-  Teensy3Clock.set(t);
-}
-
-// =============================
-//       SCRIPT LOGIC
-// =============================
+/**
+ * @brief Execute active script logic
+ */
 void handleScripts() {
   unsigned long totalPausedTime = scriptPausedTime;
   if (isScriptPaused) {
@@ -1640,14 +1806,17 @@ void handleScripts() {
   long currentSecond = currentScript.tStart + (long)(msSinceStart / 1000);
   scriptTimeSeconds = currentSecond;
 
+  // Check for script completion
   if (currentSecond >= currentScript.tEnd) {
-    stopScript(false); // Natural completion
+    stopScript(false);
     return;
   }
 
+  // Process device timing events
   for (int i = 0; i < 6; i++) {
     if (!currentScript.devices[i].enabled) continue;
 
+    // Handle device turn-on
     if (currentSecond >= currentScript.devices[i].onTime &&
         !deviceOnTriggered[i] && switchOutputs[i].state == LOW) {
       digitalWrite(switchOutputs[i].outputPin, HIGH);
@@ -1658,6 +1827,7 @@ void handleScripts() {
       }
     }
 
+    // Handle device turn-off
     if (currentSecond >= currentScript.devices[i].offTime &&
         !deviceOffTriggered[i] && switchOutputs[i].state == HIGH) {
       digitalWrite(switchOutputs[i].outputPin, LOW);
@@ -1670,13 +1840,16 @@ void handleScripts() {
   }
 }
 
+/**
+ * @brief Start script execution
+ */
 void startScript() {
   if (isScriptRunning || safetyStop) return;
 
   lockStateBeforeScript = lock;
-
   setAllOutputsOff();
 
+  // Reset trigger flags
   for (int i = 0; i < 6; i++) {
     deviceOnTriggered[i] = false;
     deviceOffTriggered[i] = false;
@@ -1689,9 +1862,13 @@ void startScript() {
   scriptPausedTime = 0;
   isScriptRunning   = true;
   isScriptPaused    = false;
-  scriptEndedEarly  = false; // Reset early end flag
+  scriptEndedEarly  = false;
 
+  // Update script usage timestamp
   currentScript.lastUsed = now();
+  char filename[64];
+  snprintf(filename, sizeof(filename), "%s.json", currentScript.scriptName);
+  updateScriptLastUsed(filename);
 
   if (currentScript.useRecord) {
     startRecording(true);
@@ -1702,6 +1879,9 @@ void startScript() {
   }
 }
 
+/**
+ * @brief Pause script execution
+ */
 void pauseScript() {
   if (!isScriptRunning || isScriptPaused) return;
 
@@ -1713,6 +1893,9 @@ void pauseScript() {
   }
 }
 
+/**
+ * @brief Resume paused script
+ */
 void resumeScript() {
   if (!isScriptRunning || !isScriptPaused) return;
 
@@ -1724,11 +1907,17 @@ void resumeScript() {
   }
 }
 
+/**
+ * @brief Stop script execution
+ * @param userEnded true if user manually stopped script
+ */
 void stopScript(bool userEnded) {
   if (!isScriptRunning) return;
+  
   isScriptRunning = false;
   isScriptPaused = false;
 
+  // Reset trigger flags
   for (int i = 0; i < 6; i++) {
     deviceOnTriggered[i] = false;
     deviceOffTriggered[i] = false;
@@ -1736,15 +1925,14 @@ void stopScript(bool userEnded) {
 
   lock = lockStateBeforeScript;
   updateLockButton();
-
-  scriptEndedEarly = userEnded; // FIXED: Track if ended early
+  scriptEndedEarly = userEnded;
 
   if (recordingScript) {
     stopRecording();
   }
 
-  // FIXED: Sync switch states to output states after script ends
-  if (!safetyStop) { // Only sync if not in safety stop
+  // Synchronize switch states after script completion
+  if (!safetyStop) {
     syncSwitchesToOutputs();
   }
 
@@ -1753,23 +1941,23 @@ void stopScript(bool userEnded) {
   }
 }
 
-// FIXED: New function to sync switches to current output states
+/**
+ * @brief Synchronize switches to current output states
+ */
 void syncSwitchesToOutputs() {
   for (int i = 0; i < numSwitches; i++) {
     if (switchOutputs[i].switchPin == -1) continue;
 
     int switchState = digitalRead(switchOutputs[i].switchPin);
-    bool switchOn = (switchState == LOW); // Assuming switch is active low
+    bool switchOn = (switchState == LOW);
 
     if (switchOn && switchOutputs[i].state == LOW) {
-      // Switch is ON but output is OFF - turn output ON
       digitalWrite(switchOutputs[i].outputPin, HIGH);
       switchOutputs[i].state = HIGH;
       if (currentMode == MODE_MAIN) drawDeviceRow(i);
       if (currentMode == MODE_SCRIPT) updateLiveValueRow(i);
     }
     else if (!switchOn && switchOutputs[i].state == HIGH) {
-      // Switch is OFF but output is ON - turn output OFF
       digitalWrite(switchOutputs[i].outputPin, LOW);
       switchOutputs[i].state = LOW;
       if (currentMode == MODE_MAIN) drawDeviceRow(i);
@@ -1778,6 +1966,9 @@ void syncSwitchesToOutputs() {
   }
 }
 
+/**
+ * @brief Create new script with default values
+ */
 void createNewScript() {
   memset(&currentScript, 0, sizeof(Script));
   strcpy(currentScript.scriptName, "Untitled");
@@ -1794,17 +1985,22 @@ void createNewScript() {
   }
 }
 
-// FIXED: Generate script-based filename
+/**
+ * @brief Generate filename for script-based recording
+ * @param buf Output buffer for filename
+ * @param buflen Size of output buffer
+ * @param scriptName Name of script
+ */
 void generateScriptFilename(char* buf, size_t buflen, const char* scriptName) {
   ensureExternalSDContext();
 
   const char* ext = csvOutput ? ".csv" : ".json";
 
-  // Clean script name (remove invalid characters)
+  // Clean script name for filesystem compatibility
   char cleanName[32];
   int cleanPos = 0;
-  size_t nameLen = strlen(scriptName); // FIXED: Store length to avoid repeated calls
-  for (size_t i = 0; i < nameLen && cleanPos < 31; i++) { // FIXED: Use size_t for loop variable
+  size_t nameLen = strlen(scriptName);
+  for (size_t i = 0; i < nameLen && cleanPos < 31; i++) {
     char c = scriptName[i];
     if (isalnum(c) || c == '-' || c == '_') {
       cleanName[cleanPos++] = c;
@@ -1814,6 +2010,7 @@ void generateScriptFilename(char* buf, size_t buflen, const char* scriptName) {
   }
   cleanName[cleanPos] = '\0';
 
+  // Find next available filename
   int idx = 0;
   while (true) {
     if (idx == 0) {
@@ -1828,6 +2025,11 @@ void generateScriptFilename(char* buf, size_t buflen, const char* scriptName) {
   }
 }
 
+/**
+ * @brief Generate next available filename for data logging
+ * @param buf Output buffer for filename
+ * @param buflen Size of output buffer
+ */
 void nextAvailableFilename(char* buf, size_t buflen) {
   int idx = 0;
   const char* ext = csvOutput ? ".csv" : ".json";
@@ -1844,6 +2046,10 @@ void nextAvailableFilename(char* buf, size_t buflen) {
   }
 }
 
+/**
+ * @brief Load all script names from internal SD
+ * @return true if scripts found, false otherwise
+ */
 bool loadAllScriptNames() {
   ensureInternalSDContext();
 
@@ -1872,8 +2078,9 @@ bool loadAllScriptNames() {
       char* ext = strstr(nameOnly, ".json");
       if (ext) *ext = '\0';
       strncpy(scriptList[numScripts].name, nameOnly, 31);
-      scriptList[numScripts].name[31] = '\0'; // FIXED: Ensure null termination
+      scriptList[numScripts].name[31] = '\0';
 
+      // Read script metadata
       char filePath[64];
       snprintf(filePath, sizeof(filePath), "%s/%s", SCRIPTS_DIR, entry.name());
       File scriptFile = SD.open(filePath, FILE_READ);
@@ -1882,10 +2089,10 @@ bool loadAllScriptNames() {
         DeserializationError error = deserializeJson(doc, scriptFile);
         if (!error) {
           scriptList[numScripts].dateCreated = doc["dateCreated"] | now();
-          scriptList[numScripts].lastUsed = doc["lastUsed"] | now();
+          scriptList[numScripts].lastUsed = doc["lastUsed"] | 946684800;
         } else {
           scriptList[numScripts].dateCreated = now();
-          scriptList[numScripts].lastUsed = now();
+          scriptList[numScripts].lastUsed = 946684800;
         }
         scriptFile.close();
       } else {
@@ -1904,6 +2111,9 @@ bool loadAllScriptNames() {
   return (numScripts > 0);
 }
 
+/**
+ * @brief Sort script list based on current sort mode
+ */
 void sortScripts() {
   for (int i = 0; i < numScripts - 1; i++) {
     for (int j = 0; j < numScripts - i - 1; j++) {
@@ -1930,6 +2140,10 @@ void sortScripts() {
   }
 }
 
+/**
+ * @brief Delete script file
+ * @param scriptName Name of script to delete
+ */
 void deleteScript(const char* scriptName) {
   ensureInternalSDContext();
 
@@ -1942,6 +2156,57 @@ void deleteScript(const char* scriptName) {
   }
 }
 
+/**
+ * @brief Update script last used timestamp
+ * @param scriptName Name of script file
+ */
+void updateScriptLastUsed(const char* scriptName) {
+  ensureInternalSDContext();
+
+  char filePath[64];
+  snprintf(filePath, sizeof(filePath), "%s/%s", SCRIPTS_DIR, scriptName);
+
+  File scriptFile = SD.open(filePath, FILE_READ);
+  if (!scriptFile) {
+    Serial.print("Failed to open script file for update: ");
+    Serial.println(filePath);
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, scriptFile);
+  scriptFile.close();
+
+  if (error) {
+    Serial.print("JSON parsing failed during lastUsed update: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  doc["lastUsed"] = now();
+
+  if (SD.exists(filePath)) {
+    SD.remove(filePath);
+  }
+
+  scriptFile = SD.open(filePath, FILE_WRITE);
+  if (!scriptFile) {
+    Serial.print("Failed to open script file for writing: ");
+    Serial.println(filePath);
+    return;
+  }
+
+  if (serializeJson(doc, scriptFile) == 0) {
+    Serial.println("Failed to write updated lastUsed to script file");
+  }
+
+  scriptFile.close();
+}
+
+/**
+ * @brief Load script from file
+ * @param scriptName Name of script file to load
+ */
 void loadScriptFromFile(const char* scriptName) {
   ensureInternalSDContext();
 
@@ -1974,7 +2239,7 @@ void loadScriptFromFile(const char* scriptName) {
   if (ext) *ext = '\0';
 
   strncpy(currentScript.scriptName, nameOnly, sizeof(currentScript.scriptName) - 1);
-  currentScript.scriptName[sizeof(currentScript.scriptName) - 1] = '\0'; // FIXED: Ensure null termination
+  currentScript.scriptName[sizeof(currentScript.scriptName) - 1] = '\0';
   currentScript.useRecord = doc["useRecord"] | true;
   currentScript.tStart = doc["tStart"] | 0;
   currentScript.tEnd = doc["tEnd"] | 120;
@@ -1988,10 +2253,16 @@ void loadScriptFromFile(const char* scriptName) {
     currentScript.devices[i].offTime = devices[i]["offTime"] | 10;
   }
 
+  updateScriptLastUsed(scriptName);
+
   Serial.print("Loaded script: ");
   Serial.println(currentScript.scriptName);
+  loadAllScriptNames();
 }
 
+/**
+ * @brief Save current script to file
+ */
 void saveCurrentScript() {
   ensureInternalSDContext();
 
@@ -2045,9 +2316,24 @@ void saveCurrentScript() {
   loadAllScriptNames();
 }
 
-// =============================
-//   TOUCH HANDLERS
-// =============================
+// ==================== Touch Interface ====================
+
+/**
+ * @brief Check if touch coordinates are within button bounds
+ * @param x X coordinate
+ * @param y Y coordinate
+ * @param btn Button region to check
+ * @return true if touch is within button
+ */
+bool touchInButton(int16_t x, int16_t y, const ButtonRegion& btn) {
+  return btn.enabled && (x >= btn.x && x <= btn.x+btn.w && y >= btn.y && y <= btn.y+btn.h);
+}
+
+/**
+ * @brief Handle touch events on main screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchMain(int16_t x, int16_t y) {
   ButtonRegion* buttons[] = {
     &btnRecord, &btnSDRefresh, &btnStop, &btnLock, &btnAllOn,
@@ -2062,6 +2348,8 @@ void handleTouchMain(int16_t x, int16_t y) {
       break;
     }
   }
+  
+  // Show button press feedback
   if (pressedIdx >= 0) {
     ButtonRegion* btn = buttons[pressedIdx];
     drawButton(*btn, btn->color, COLOR_WHITE, btn->label, true, btn->enabled);
@@ -2069,6 +2357,7 @@ void handleTouchMain(int16_t x, int16_t y) {
     drawButton(*btn, btn->color, COLOR_BLACK, btn->label, false, btn->enabled);
   }
 
+  // Process button actions
   if (touchInButton(x, y, btnRecord)) {
     if (!btnRecord.enabled) return;
     if (!recording) {
@@ -2091,7 +2380,6 @@ void handleTouchMain(int16_t x, int16_t y) {
       if (isScriptRunning) {
         stopScript(true);
       }
-
       if (recording) {
         stopRecording();
       }
@@ -2147,78 +2435,242 @@ void handleTouchMain(int16_t x, int16_t y) {
   }
 }
 
+/**
+ * @brief Handle touch events on settings screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchSettings(int16_t x, int16_t y) {
-  if (touchInButton(x, y, btnSettingsBack)) {
-    currentMode = MODE_MAIN;
-    drawMainScreen();
-    return;
-  }
-  if (touchInButton(x, y, btnSettingsStop)) {
-    if (!safetyStop) {
-      lockBeforeStop = lock;
-      safetyStop = true;
-      setAllOutputsOff();
-      drawButton(btnSettingsStop, COLOR_PURPLE, COLOR_BLACK, "RELEASE",
-                 false, btnSettingsStop.enabled);
-      if (isScriptRunning) {
-        stopScript(true);
+  ButtonRegion* buttons[] = {
+    &btnSettingsBack, &btnSettingsStop, &btnFanSpeedInput, &btnUpdateRateInput,
+    &btnSetTimeDate, &btnTimeFormatToggle, &btnDarkModeToggle, &btnNetwork, &btnAbout
+  };
+  int btnCount = sizeof(buttons) / sizeof(buttons[0]);
+
+  for (int i = 0; i < btnCount; i++) {
+    if (touchInButton(x, y, *buttons[i])) {
+      ButtonRegion* btn = buttons[i];
+
+      drawButton(*btn, COLOR_BTN_PRESS, COLOR_WHITE, btn->label, true, btn->enabled);
+      delay(150);
+
+      if (btn == &btnSettingsBack) {
+        currentMode = MODE_MAIN;
+        drawMainScreen();
+        return;
       }
-      if (recording) {
-        stopRecording();
+      else if (btn == &btnSettingsStop) {
+        if (!safetyStop) {
+          lockBeforeStop = lock;
+          safetyStop = true;
+          setAllOutputsOff();
+          if (isScriptRunning) stopScript(true);
+          if (recording) stopRecording();
+        } else {
+          safetyStop = false;
+          bool prevLock = lock;
+          lock = lockBeforeStop;
+          if (!lock && prevLock) syncOutputsToSwitches();
+        }
+        drawSettingsPanel();
+        return;
       }
-    } else {
-      safetyStop = false;
-      bool prevLock = lock;
-      lock = lockBeforeStop;
-      drawButton(btnSettingsStop, COLOR_YELLOW, COLOR_BLACK, "STOP",
-                 false, btnSettingsStop.enabled);
-      if (!lock && prevLock) syncOutputsToSwitches();
+      else if (btn == &btnFanSpeedInput) {
+        currentMode = MODE_KEYPAD;
+        keypadMode = KEYPAD_FAN_SPEED;
+        keypadPos = 0;
+        keypadBuffer[0] = 0;
+        drawKeypadPanel();
+        return;
+      }
+      else if (btn == &btnUpdateRateInput) {
+        currentMode = MODE_KEYPAD;
+        keypadMode = KEYPAD_UPDATE_RATE;
+        keypadPos = 0;
+        keypadBuffer[0] = 0;
+        drawKeypadPanel();
+        return;
+      }
+      else if (btn == &btnSetTimeDate) {
+        time_t t = now();
+        breakTime(t, tmSet);
+        currentMode = MODE_DATE_TIME;
+        drawDateTimePanel();
+        return;
+      }
+      else if (btn == &btnTimeFormatToggle) {
+        use24HourFormat = !use24HourFormat;
+        saveSettingsToEEPROM();
+        drawSettingsPanel();
+        return;
+      }
+      else if (btn == &btnDarkModeToggle) {
+        darkMode = !darkMode;
+        saveSettingsToEEPROM();
+        applyDarkMode();
+        drawSettingsPanel();
+        return;
+      }
+      else if (btn == &btnNetwork) {
+        currentMode = MODE_NETWORK;
+        drawNetworkPanel();
+        return;
+      }
+      else if (btn == &btnAbout) {
+        currentMode = MODE_ABOUT;
+        drawAboutPage();
+        return;
+      }
+
+      drawSettingsPanel();
+      return;
     }
-    return;
-  }
-  if (touchInButton(x, y, btnFanSpeedInput)) {
-    currentMode  = MODE_KEYPAD;
-    keypadMode   = KEYPAD_FAN_SPEED;
-    keypadPos    = 0;
-    keypadBuffer[0] = 0;
-    drawKeypadPanel();
-    return;
-  }
-  if (touchInButton(x, y, btnUpdateRateInput)) {
-    currentMode  = MODE_KEYPAD;
-    keypadMode   = KEYPAD_UPDATE_RATE;
-    keypadPos    = 0;
-    keypadBuffer[0] = 0;
-    drawKeypadPanel();
-    return;
-  }
-  if (touchInButton(x, y, btnSetTimeDate)) {
-    time_t t = now();
-    breakTime(t, tmSet);
-    currentMode = MODE_DATE_TIME;
-    drawDateTimePanel();
-    return;
-  }
-  if (touchInButton(x, y, btnTimeFormatToggle)) {
-    use24HourFormat = !use24HourFormat;
-    saveSettingsToEEPROM();
-    drawSettingsPanel();
-    return;
-  }
-  if (touchInButton(x, y, btnDarkModeToggle)) {
-    darkMode = !darkMode;
-    applyDarkMode();
-    saveSettingsToEEPROM();
-    drawSettingsPanel();
-    return;
-  }
-  if (touchInButton(x, y, btnAbout)) {
-    currentMode = MODE_ABOUT;
-    drawAboutPage();
-    return;
   }
 }
 
+/**
+ * @brief Handle touch events on network settings screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
+void handleTouchNetwork(int16_t x, int16_t y) {
+  ButtonRegion* buttons[] = {
+    &btnNetworkBack, &btnNetworkStop, &btnEnableLanToggle, &btnNetworkEdit
+  };
+  int btnCount = sizeof(buttons) / sizeof(buttons[0]);
+
+  for (int i = 0; i < btnCount; i++) {
+    if (touchInButton(x, y, *buttons[i])) {
+      ButtonRegion* btn = buttons[i];
+
+      drawButton(*btn, COLOR_BTN_PRESS, COLOR_WHITE, btn->label, true, btn->enabled);
+      delay(150);
+
+      if (btn == &btnNetworkBack) {
+        currentMode = MODE_SETTINGS;
+        drawSettingsPanel();
+        return;
+      }
+      else if (btn == &btnNetworkStop) {
+        if (!safetyStop) {
+          lockBeforeStop = lock;
+          safetyStop = true;
+          setAllOutputsOff();
+          if (isScriptRunning) stopScript(true);
+          if (recording) stopRecording();
+        } else {
+          safetyStop = false;
+          bool prevLock = lock;
+          lock = lockBeforeStop;
+          if (!lock && prevLock) syncOutputsToSwitches();
+        }
+        drawNetworkPanel();
+        return;
+      }
+      else if (btn == &btnEnableLanToggle) {
+        networkConfig.enableEthernet = !networkConfig.enableEthernet;
+        saveNetworkConfig();
+        drawNetworkPanel();
+        return;
+      }
+      else if (btn == &btnNetworkEdit) {
+        currentMode = MODE_NETWORK_EDIT;
+        loadNetworkFieldsFromConfig();
+        drawNetworkEditPanel();
+        return;
+      }
+
+      drawNetworkPanel();
+      return;
+    }
+  }
+}
+
+/**
+ * @brief Handle touch events on network edit screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
+void handleTouchNetworkEdit(int16_t x, int16_t y) {
+  ButtonRegion* buttons[] = {
+    &btnNetworkEditBack, &btnNetworkEditStop, &btnDhcpToggle, &btnNetworkEditSave
+  };
+  int btnCount = sizeof(buttons) / sizeof(buttons[0]);
+
+  for (int i = 0; i < btnCount; i++) {
+    if (touchInButton(x, y, *buttons[i])) {
+      ButtonRegion* btn = buttons[i];
+
+      drawButton(*btn, COLOR_BTN_PRESS, COLOR_WHITE, btn->label, true, btn->enabled);
+      delay(150);
+
+      if (btn == &btnNetworkEditBack) {
+        currentMode = MODE_NETWORK;
+        drawNetworkPanel();
+        return;
+      }
+      else if (btn == &btnNetworkEditStop) {
+        if (!safetyStop) {
+          lockBeforeStop = lock;
+          safetyStop = true;
+          setAllOutputsOff();
+          if (isScriptRunning) stopScript(true);
+          if (recording) stopRecording();
+        } else {
+          safetyStop = false;
+          bool prevLock = lock;
+          lock = lockBeforeStop;
+          if (!lock && prevLock) syncOutputsToSwitches();
+        }
+        drawNetworkEditPanel();
+        return;
+      }
+      else if (btn == &btnDhcpToggle) {
+        networkConfig.useDHCP = !networkConfig.useDHCP;
+        drawNetworkEditPanel();
+        return;
+      }
+      else if (btn == &btnNetworkEditSave) {
+        saveNetworkConfig();
+        currentMode = MODE_NETWORK;
+        drawNetworkPanel();
+        return;
+      }
+
+      drawNetworkEditPanel();
+      return;
+    }
+  }
+
+  // Handle network field touch
+  for (int i = 0; i < numNetworkFields; i++) {
+    if (x >= networkFields[i].x && x <= (networkFields[i].x + networkFields[i].w) &&
+        y >= networkFields[i].y && y <= (networkFields[i].y + networkFields[i].h)) {
+
+      selectedNetworkField = i;
+      strcpy(keypadBuffer, networkFields[i].value);
+      keypadPos = strlen(keypadBuffer);
+
+      if (networkFields[i].fieldType == 0) {
+        keypadMode = KEYPAD_NETWORK_IP;
+      } else if (networkFields[i].fieldType == 1) {
+        keypadMode = KEYPAD_NETWORK_PORT;
+      } else {
+        keypadMode = KEYPAD_NETWORK_TIMEOUT;
+      }
+
+      currentMode = MODE_KEYPAD;
+      drawKeypadPanel();
+      return;
+    }
+  }
+}
+
+/**
+ * @brief Handle touch events on script screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchScript(int16_t x, int16_t y) {
   ButtonRegion* buttons[] = {
     &btnScriptBack, &btnScriptStop,
@@ -2314,7 +2766,13 @@ void handleTouchScript(int16_t x, int16_t y) {
   }
 }
 
+/**
+ * @brief Handle touch events on edit screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchEdit(int16_t x, int16_t y) {
+  // Handle script name editing
   if (y >= 10 && y <= 35 && x >= 100 && x <= 380) {
     strcpy(keypadBuffer, currentScript.scriptName);
     keypadPos = strlen(keypadBuffer);
@@ -2401,6 +2859,7 @@ void handleTouchEdit(int16_t x, int16_t y) {
     return;
   }
 
+  // Handle edit field touches
   for (int i = 0; i < numEditFields; i++) {
     if (x >= editFields[i].x && x <= (editFields[i].x + editFields[i].w) &&
         y >= editFields[i].y && y <= (editFields[i].y + editFields[i].h)) {
@@ -2428,6 +2887,7 @@ void handleTouchEdit(int16_t x, int16_t y) {
     }
   }
 
+  // Handle device field touches
   for (int i = 0; i < numDeviceFields; i++) {
     if (x >= deviceFields[i].x && x <= (deviceFields[i].x + deviceFields[i].w) &&
         y >= deviceFields[i].y && y <= (deviceFields[i].y + deviceFields[i].h)) {
@@ -2458,6 +2918,11 @@ void handleTouchEdit(int16_t x, int16_t y) {
   }
 }
 
+/**
+ * @brief Handle touch events on script load screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchScriptLoad(int16_t x, int16_t y) {
   if (x < 80 && y < 40) {
     currentMode = previousMode;
@@ -2474,6 +2939,7 @@ void handleTouchScriptLoad(int16_t x, int16_t y) {
 
   if (touchInButton(x, y, btnSortDropdown)) {
     currentSortMode = (SortMode)((currentSortMode + 1) % 3);
+    saveSettingsToEEPROM();
     sortScripts();
     selectedScript = -1;
     highlightedScript = -1;
@@ -2504,6 +2970,7 @@ void handleTouchScriptLoad(int16_t x, int16_t y) {
     return;
   }
 
+  // Handle script list selection
   int yOffset = 60;
   int lineHeight = 22;
   int visibleScripts = min(numScripts - scriptListOffset, 10);
@@ -2521,6 +2988,7 @@ void handleTouchScriptLoad(int16_t x, int16_t y) {
     }
   }
 
+  // Handle scroll controls
   if (numScripts > 10) {
     if (x >= 440 && x <= 470 && y >= 60 && y <= 90 && scriptListOffset > 0) {
       scriptListOffset--;
@@ -2543,10 +3011,13 @@ void handleTouchScriptLoad(int16_t x, int16_t y) {
       return;
     }
   }
-
-  // FIXED: Remove search box touch handling - now handled by direct keypad input
 }
 
+/**
+ * @brief Handle touch events on delete confirmation dialog
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchDeleteConfirm(int16_t x, int16_t y) {
   if (touchInButton(x, y, btnDeleteYes)) {
     if (selectedScript >= 0) {
@@ -2568,8 +3039,13 @@ void handleTouchDeleteConfirm(int16_t x, int16_t y) {
   }
 }
 
+/**
+ * @brief Handle touch events on edit field screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchEditField(int16_t x, int16_t y) {
-  if (touchInButton(x, y, btnEditFieldBack)) {  // Change from btnModalBack
+  if (touchInButton(x, y, btnEditFieldBack)) {
     currentMode = MODE_EDIT;
     drawEditPage();
     return;
@@ -2578,7 +3054,11 @@ void handleTouchEditField(int16_t x, int16_t y) {
   drawEditPage();
 }
 
-// FIXED: Proper back button handling for edit save
+/**
+ * @brief Handle touch events on edit save screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchEditSave(int16_t x, int16_t y) {
   if (touchInButton(x, y, btnEditSaveBack)) {
     currentMode = MODE_EDIT;
@@ -2587,7 +3067,11 @@ void handleTouchEditSave(int16_t x, int16_t y) {
   }
 }
 
-// FIXED: Proper back button handling for edit name
+/**
+ * @brief Handle touch events on edit name screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchEditName(int16_t x, int16_t y) {
   if (touchInButton(x, y, btnEditNameBack)) {
     currentMode = MODE_EDIT;
@@ -2596,6 +3080,11 @@ void handleTouchEditName(int16_t x, int16_t y) {
   }
 }
 
+/**
+ * @brief Handle touch events on about screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchAbout(int16_t x, int16_t y) {
   if (touchInButton(x, y, btnAboutBack)) {
     currentMode = MODE_SETTINGS;
@@ -2627,6 +3116,11 @@ void handleTouchAbout(int16_t x, int16_t y) {
   }
 }
 
+/**
+ * @brief Handle touch events on date/time screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchDateTime(int16_t x, int16_t y) {
   if (x < 80 && y < 40) {
     currentMode = MODE_SETTINGS;
@@ -2645,86 +3139,57 @@ void handleTouchDateTime(int16_t x, int16_t y) {
   int fieldWidth = 60;
   int fieldHeight = 30;
 
-  // Year field
-  if (x >= fieldX && x <= (fieldX + fieldWidth) && y >= 70 && y <= (70 + fieldHeight)) {
-    tmSet.Year = constrain(tmSet.Year + 1, 25, 99);
-    drawDateTimePanel();
-    return;
-  }
-  if (x >= (fieldX - 30) && x <= fieldX && y >= 70 && y <= (70 + fieldHeight)) {
-    tmSet.Year = constrain(tmSet.Year - 1, 25, 99);
-    drawDateTimePanel();
-    return;
-  }
+  // Handle field adjustments
+  struct DateTimeField {
+    int minY, maxY;
+    void (*increment)();
+    void (*decrement)();
+  };
 
-  // Month field
-  if (x >= fieldX && x <= (fieldX + fieldWidth) && y >= 110 && y <= (110 + fieldHeight)) {
-    tmSet.Month = tmSet.Month % 12 + 1;
-    drawDateTimePanel();
-    return;
-  }
-  if (x >= (fieldX - 30) && x <= fieldX && y >= 110 && y <= (110 + fieldHeight)) {
-    tmSet.Month = (tmSet.Month + 10) % 12 + 1;
-    drawDateTimePanel();
-    return;
-  }
+  DateTimeField fields[] = {
+    {70, 70+fieldHeight, [](){tmSet.Year = constrain(tmSet.Year + 1, 25, 99);}, [](){tmSet.Year = constrain(tmSet.Year - 1, 25, 99);}},
+    {110, 110+fieldHeight, [](){tmSet.Month = tmSet.Month % 12 + 1;}, [](){tmSet.Month = (tmSet.Month + 10) % 12 + 1;}},
+    {150, 150+fieldHeight, [](){tmSet.Day = tmSet.Day % 31 + 1;}, [](){tmSet.Day = (tmSet.Day + 29) % 31 + 1;}},
+    {190, 190+fieldHeight, [](){tmSet.Hour = (tmSet.Hour + 1) % 24;}, [](){tmSet.Hour = (tmSet.Hour + 23) % 24;}},
+    {230, 230+fieldHeight, [](){tmSet.Minute = (tmSet.Minute + 1) % 60;}, [](){tmSet.Minute = (tmSet.Minute + 59) % 60;}},
+    {270, 270+fieldHeight, [](){tmSet.Second = (tmSet.Second + 1) % 60;}, [](){tmSet.Second = (tmSet.Second + 59) % 60;}}
+  };
 
-  // Day field
-  if (x >= fieldX && x <= (fieldX + fieldWidth) && y >= 150 && y <= (150 + fieldHeight)) {
-    tmSet.Day = tmSet.Day % 31 + 1;
-    drawDateTimePanel();
-    return;
-  }
-  if (x >= (fieldX - 30) && x <= fieldX && y >= 150 && y <= (150 + fieldHeight)) {
-    tmSet.Day = (tmSet.Day + 29) % 31 + 1;
-    drawDateTimePanel();
-    return;
-  }
-
-  // Hour field
-  if (x >= fieldX && x <= (fieldX + fieldWidth) && y >= 190 && y <= (190 + fieldHeight)) {
-    tmSet.Hour = (tmSet.Hour + 1) % 24;
-    drawDateTimePanel();
-    return;
-  }
-  if (x >= (fieldX - 30) && x <= fieldX && y >= 190 && y <= (190 + fieldHeight)) {
-    tmSet.Hour = (tmSet.Hour + 23) % 24;
-    drawDateTimePanel();
-    return;
-  }
-
-  // Minute field
-  if (x >= fieldX && x <= (fieldX + fieldWidth) && y >= 230 && y <= (230 + fieldHeight)) {
-    tmSet.Minute = (tmSet.Minute + 1) % 60;
-    drawDateTimePanel();
-    return;
-  }
-  if (x >= (fieldX - 30) && x <= fieldX && y >= 230 && y <= (230 + fieldHeight)) {
-    tmSet.Minute = (tmSet.Minute + 59) % 60;
-    drawDateTimePanel();
-    return;
-  }
-
-  // Second field
-  if (x >= fieldX && x <= (fieldX + fieldWidth) && y >= 270 && y <= (270 + fieldHeight)) {
-    tmSet.Second = (tmSet.Second + 1) % 60;
-    drawDateTimePanel();
-    return;
-  }
-  if (x >= (fieldX - 30) && x <= fieldX && y >= 270 && y <= (270 + fieldHeight)) {
-    tmSet.Second = (tmSet.Second + 59) % 60;
-    drawDateTimePanel();
-    return;
+  for (int i = 0; i < 6; i++) {
+    if (y >= fields[i].minY && y <= fields[i].maxY) {
+      if (x >= fieldX && x <= (fieldX + fieldWidth)) {
+        fields[i].increment();
+        drawDateTimePanel();
+        return;
+      }
+      if (x >= (fieldX - 30) && x <= fieldX) {
+        fields[i].decrement();
+        drawDateTimePanel();
+        return;
+      }
+    }
   }
 }
 
+/**
+ * @brief Handle keypad input for various modes
+ * @param key Key pressed
+ */
 void handleKeypadInput(char key) {
   if (currentMode == MODE_KEYPAD) {
     if (keypadMode == KEYPAD_DEVICE_ON_TIME || keypadMode == KEYPAD_DEVICE_OFF_TIME ||
         keypadMode == KEYPAD_SCRIPT_TSTART || keypadMode == KEYPAD_SCRIPT_TEND ||
-        keypadMode == KEYPAD_UPDATE_RATE || keypadMode == KEYPAD_FAN_SPEED) {
+        keypadMode == KEYPAD_UPDATE_RATE || keypadMode == KEYPAD_FAN_SPEED ||
+        keypadMode == KEYPAD_NETWORK_IP || keypadMode == KEYPAD_NETWORK_PORT ||
+        keypadMode == KEYPAD_NETWORK_TIMEOUT) {
 
       if (key >= '0' && key <= '9') {
+        if (keypadPos < (int)sizeof(keypadBuffer) - 1) {
+          keypadBuffer[keypadPos++] = key;
+          keypadBuffer[keypadPos] = 0;
+        }
+      }
+      else if (key == '.' && keypadMode == KEYPAD_NETWORK_IP) {
         if (keypadPos < (int)sizeof(keypadBuffer) - 1) {
           keypadBuffer[keypadPos++] = key;
           keypadBuffer[keypadPos] = 0;
@@ -2736,13 +3201,15 @@ void handleKeypadInput(char key) {
         }
       }
       else if (key == '#') {
-        if (keypadBuffer[0] == '-') {
-          memmove(keypadBuffer, keypadBuffer + 1, keypadPos);
-          keypadPos--;
-        } else {
-          memmove(keypadBuffer + 1, keypadBuffer, keypadPos + 1);
-          keypadBuffer[0] = '-';
-          keypadPos++;
+        if (keypadMode != KEYPAD_NETWORK_IP) {
+          if (keypadBuffer[0] == '-') {
+            memmove(keypadBuffer, keypadBuffer + 1, keypadPos);
+            keypadPos--;
+          } else {
+            memmove(keypadBuffer + 1, keypadBuffer, keypadPos + 1);
+            keypadBuffer[0] = '-';
+            keypadPos++;
+          }
         }
       }
       else if (key == 'A') {
@@ -2764,6 +3231,7 @@ void handleKeypadInput(char key) {
             if (val < 0) val = 0;
             if (val > 255) val = 255;
             fanSpeed = val;
+            fanOn = (val > 0);
             saveSettingsToEEPROM();
             applyFanSettings();
             currentMode = MODE_SETTINGS;
@@ -2810,17 +3278,35 @@ void handleKeypadInput(char key) {
             drawEditPage();
             break;
           }
+          case KEYPAD_NETWORK_IP:
+          case KEYPAD_NETWORK_PORT:
+          case KEYPAD_NETWORK_TIMEOUT: {
+            if (selectedNetworkField >= 0) {
+              saveNetworkFieldToConfig(selectedNetworkField, keypadBuffer);
+              strcpy(networkFields[selectedNetworkField].value, keypadBuffer);
+            }
+            currentMode = MODE_NETWORK_EDIT;
+            keypadMode = KEYPAD_NONE;
+            drawNetworkEditPanel();
+            break;
+          }
           default:
             break;
         }
         return;
       }
       else if (key == 'B') {
-        currentMode = (keypadMode == KEYPAD_UPDATE_RATE || keypadMode == KEYPAD_FAN_SPEED) ?
-                      MODE_SETTINGS : MODE_EDIT;
+        if (keypadMode == KEYPAD_UPDATE_RATE || keypadMode == KEYPAD_FAN_SPEED) {
+          currentMode = MODE_SETTINGS;
+          drawSettingsPanel();
+        } else if (keypadMode == KEYPAD_NETWORK_IP || keypadMode == KEYPAD_NETWORK_PORT || keypadMode == KEYPAD_NETWORK_TIMEOUT) {
+          currentMode = MODE_NETWORK_EDIT;
+          drawNetworkEditPanel();
+        } else {
+          currentMode = MODE_EDIT;
+          drawEditPage();
+        }
         keypadMode = KEYPAD_NONE;
-        if (currentMode == MODE_SETTINGS) drawSettingsPanel();
-        else drawEditPage();
         return;
       }
       else if (key == 'C') {
@@ -2925,19 +3411,225 @@ void handleKeypadInput(char key) {
   }
 }
 
-// FIXED: Proper back button handling for keypad
+/**
+ * @brief Handle touch events on keypad screen
+ * @param x Touch X coordinate
+ * @param y Touch Y coordinate
+ */
 void handleTouchKeypad(int16_t x, int16_t y) {
-  if (touchInButton(x, y, btnKeypadBack)) {  // Change from btnModalBack
-    currentMode = (keypadMode == KEYPAD_UPDATE_RATE || keypadMode == KEYPAD_FAN_SPEED) ?
-                  MODE_SETTINGS : MODE_EDIT;
+  if (touchInButton(x, y, btnKeypadBack)) {
+    if (keypadMode == KEYPAD_UPDATE_RATE || keypadMode == KEYPAD_FAN_SPEED) {
+      currentMode = MODE_SETTINGS;
+      drawSettingsPanel();
+    } else if (keypadMode == KEYPAD_NETWORK_IP || keypadMode == KEYPAD_NETWORK_PORT || keypadMode == KEYPAD_NETWORK_TIMEOUT) {
+      currentMode = MODE_NETWORK_EDIT;
+      drawNetworkEditPanel();
+    } else {
+      currentMode = MODE_EDIT;
+      drawEditPage();
+    }
     keypadMode = KEYPAD_NONE;
-    if (currentMode == MODE_SETTINGS) drawSettingsPanel();
-    else drawEditPage();
     return;
   }
 }
 
-// ==================== Drawing Functions ====================
+/**
+ * @brief Handle universal back button navigation
+ */
+void handleUniversalBackButton() {
+  switch(currentMode) {
+    case MODE_SETTINGS:
+      currentMode = MODE_MAIN;
+      drawMainScreen();
+      break;
+    case MODE_NETWORK:
+      currentMode = MODE_SETTINGS;
+      drawSettingsPanel();
+      break;
+    case MODE_SCRIPT:
+      currentMode = MODE_MAIN;
+      drawMainScreen();
+      break;
+    case MODE_EDIT:
+      currentMode = MODE_MAIN;
+      drawMainScreen();
+      break;
+    case MODE_SCRIPT_LOAD:
+    case MODE_EDIT_LOAD:
+      currentMode = previousMode;
+      if (previousMode == MODE_SCRIPT) {
+        drawScriptPage();
+      } else {
+        drawEditPage();
+      }
+      break;
+    case MODE_DATE_TIME:
+      currentMode = MODE_SETTINGS;
+      drawSettingsPanel();
+      break;
+    case MODE_DELETE_CONFIRM:
+      currentMode = (previousMode == MODE_SCRIPT) ? MODE_SCRIPT_LOAD : MODE_EDIT_LOAD;
+      drawScriptLoadPage();
+      break;
+    case MODE_ABOUT:
+      currentMode = MODE_SETTINGS;
+      drawSettingsPanel();
+      break;
+    default:
+      break;
+  }
+}
+
+// ==================== Display Functions ====================
+
+/**
+ * @brief Draw button with specified appearance
+ * @param btn Button region structure
+ * @param bgColor Background color
+ * @param textColor Text color
+ * @param label Button label text
+ * @param pressed Button pressed state
+ * @param enabled Button enabled state
+ */
+void drawButton(ButtonRegion& btn, uint16_t bgColor, uint16_t textColor,
+                const char* label, bool pressed, bool enabled) {
+  btn.color = bgColor;
+  btn.pressed = pressed;
+  btn.enabled = enabled;
+  uint16_t fill = !enabled ? COLOR_GRAY : (pressed ? COLOR_BTN_PRESS : bgColor);
+  tft.fillRect(btn.x, btn.y, btn.w, btn.h, fill);
+  tft.drawRect(btn.x, btn.y, btn.w, btn.h, COLOR_BLACK);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setTextColor(textColor);
+  int16_t x1, y1;
+  uint16_t w, h;
+  tft.getTextBounds(label, btn.x, btn.y, &x1, &y1, &w, &h);
+  int tx = btn.x + (btn.w - w) / 2;
+  int ty = btn.y + (btn.h + h) / 2;
+  tft.setCursor(tx, ty);
+  tft.print(label);
+}
+
+/**
+ * @brief Draw system initialization screen
+ */
+void drawInitializationScreen() {
+  tft.fillScreen(COLOR_BLACK);
+
+  tft.setFont(&FreeSansBold12pt7b);
+  tft.setTextColor(COLOR_WHITE);
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  String title = "Mini Chris Box V5.1";
+  tft.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor((SCREEN_WIDTH - w) / 2, 80);
+  tft.print(title);
+
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextColor(COLOR_YELLOW);
+
+  String status = "Initializing...";
+  tft.getTextBounds(status, 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor((SCREEN_WIDTH - w) / 2, 120);
+  tft.print(status);
+
+  // Show initialization progress
+  tft.setTextColor(COLOR_CYAN);
+  tft.setCursor(50, 160);
+  tft.print("• Sensors initialized");
+  tft.setCursor(50, 180);
+  tft.print("• Display ready");
+  tft.setCursor(50, 200);
+  tft.print("• SD cards checked");
+
+  updateInitializationScreen();
+}
+
+/**
+ * @brief Update initialization screen with network status
+ */
+void updateInitializationScreen() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastInitScreenUpdate < 250) return;
+  lastInitScreenUpdate = currentTime;
+
+  tft.setFont(&FreeSans9pt7b);
+
+  String statusText = "";
+  uint16_t statusColor = COLOR_GRAY;
+
+  if (networkConfig.enableEthernet) {
+    unsigned long elapsed = currentTime - networkInitStartTime;
+    String timeStr = "";
+    if (elapsed < 10000) {
+      timeStr = "[" + String(elapsed / 1000) + "s]";
+    } else {
+      timeStr = "[" + String(elapsed) + "ms]";
+    }
+
+    switch (networkInitState) {
+      case NET_IDLE:
+        statusText = "• Network: Starting... " + timeStr;
+        statusColor = COLOR_GRAY;
+        break;
+      case NET_CHECKING_LINK:
+        statusText = "• Network: Checking cable... " + timeStr;
+        statusColor = COLOR_YELLOW;
+        break;
+      case NET_INITIALIZING:
+        statusText = "• Network: Initializing... " + timeStr;
+        statusColor = COLOR_YELLOW;
+        break;
+      case NET_DHCP_WAIT:
+        statusText = "• Network: Getting IP... " + timeStr;
+        statusColor = COLOR_YELLOW;
+        break;
+      case NET_INITIALIZED:
+        statusText = "• Network: Ready";
+        statusColor = COLOR_GREEN;
+        break;
+      case NET_FAILED:
+        statusText = "• Network: Failed";
+        statusColor = COLOR_RED;
+        break;
+    }
+  } else {
+    statusText = "• Network: Disabled";
+    statusColor = COLOR_GRAY;
+  }
+
+  // Update status text only if changed
+  if (statusText != lastInitStatusText) {
+    tft.fillRect(50, 210, 400, 25, COLOR_BLACK);
+    tft.setTextColor(statusColor);
+    tft.setCursor(50, 230);
+    tft.print(statusText);
+    lastInitStatusText = statusText;
+  }
+
+  // Show completion message
+  if (networkInitState == NET_INITIALIZED || networkInitState == NET_FAILED || !networkConfig.enableEthernet) {
+    tft.fillRect(50, 250, 400, 60, COLOR_BLACK);
+
+    tft.setTextColor(COLOR_GREEN);
+    tft.setCursor(50, 270);
+    tft.print("System Ready!");
+
+    if (networkInitState == NET_INITIALIZED) {
+      tft.setTextColor(COLOR_CYAN);
+      tft.setCursor(50, 290);
+      tft.print("IP: " + ipToString(Ethernet.localIP()));
+      tft.setCursor(50, 310);
+      tft.print("TCP: " + String(networkConfig.tcpPort) + "  UDP: " + String(networkConfig.udpPort));
+    }
+  }
+}
+
+/**
+ * @brief Draw main control screen
+ */
 void drawMainScreen() {
   tft.fillScreen(COLOR_BLACK);
 
@@ -2946,6 +3638,7 @@ void drawMainScreen() {
   int16_t x1, y1;
   uint16_t w, h;
 
+  // Display time or script time
   if (!isScriptRunning) {
     String nowStr = getCurrentTimeString();
     tft.getTextBounds(nowStr, 0, 0, &x1, &y1, &w, &h);
@@ -2963,6 +3656,7 @@ void drawMainScreen() {
     tft.print(buff);
   }
 
+  // Draw control buttons
   drawButton(btnRecord,
              !sdAvailable ? COLOR_GRAY : (recording ? COLOR_RECORDING : COLOR_RECORD),
              COLOR_WHITE,
@@ -2989,6 +3683,7 @@ void drawMainScreen() {
   updateLockButton();
   drawButton(btnSettings, COLOR_YELLOW, COLOR_BLACK, "Settings", false, btnSettings.enabled);
 
+  // Draw data table header
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(COLOR_WHITE);
 
@@ -3003,15 +3698,20 @@ void drawMainScreen() {
 
   tft.drawLine(5, 65, SCREEN_WIDTH - 5, 65, COLOR_GRAY);
 
+  // Draw device rows
   for (int i = 0; i < numSwitches; i++) {
     drawDeviceRow(i);
   }
 
+  // Draw total row
   int totalRowY = 85 + numSwitches * 25 + 10;
   tft.drawLine(5, totalRowY - 5, SCREEN_WIDTH - 5, totalRowY - 5, COLOR_GRAY);
   drawTotalRow();
 }
 
+/**
+ * @brief Draw settings configuration panel
+ */
 void drawSettingsPanel() {
   tft.fillScreen(COLOR_BLACK);
 
@@ -3028,6 +3728,7 @@ void drawSettingsPanel() {
 
   tft.setFont(&FreeSans9pt7b);
 
+  // Fan speed setting
   tft.fillRect(20, 70, 460, 30, COLOR_DARK_ROW1);
   tft.setTextColor(COLOR_WHITE);
   tft.setCursor(30, 90);
@@ -3036,6 +3737,7 @@ void drawSettingsPanel() {
   snprintf(buf, sizeof(buf), "%d", fanSpeed);
   drawButton(btnFanSpeedInput, COLOR_YELLOW, COLOR_BLACK, buf, false, true);
 
+  // Update rate setting
   tft.fillRect(20, 110, 460, 30, COLOR_DARK_ROW2);
   tft.setTextColor(COLOR_WHITE);
   tft.setCursor(30, 130);
@@ -3044,26 +3746,32 @@ void drawSettingsPanel() {
   snprintf(buf2, sizeof(buf2), "%lu", updateRate);
   drawButton(btnUpdateRateInput, COLOR_YELLOW, COLOR_BLACK, buf2, false, true);
 
+  // RTC clock setting
   tft.fillRect(20, 150, 460, 30, COLOR_DARK_ROW1);
   tft.setTextColor(COLOR_WHITE);
   tft.setCursor(30, 170);
   tft.print("RTC Clock:");
   drawButton(btnSetTimeDate, COLOR_YELLOW, COLOR_BLACK, "Set", false, true);
 
+  // Time format setting
   tft.fillRect(20, 190, 460, 30, COLOR_DARK_ROW2);
   tft.setTextColor(COLOR_WHITE);
   tft.setCursor(30, 210);
   tft.print("Time Format:");
   drawButton(btnTimeFormatToggle, COLOR_YELLOW, COLOR_BLACK, use24HourFormat ? "24H" : "12H", false, true);
 
+  // Dark mode setting
   tft.fillRect(20, 230, 460, 30, COLOR_DARK_ROW1);
   tft.setTextColor(COLOR_WHITE);
   tft.setCursor(30, 250);
   tft.print("Dark Mode:");
   drawButton(btnDarkModeToggle, COLOR_YELLOW, COLOR_BLACK, darkMode ? "ON" : "OFF", false, true);
 
+  // Additional settings buttons
+  drawButton(btnNetwork, COLOR_YELLOW, COLOR_BLACK, "Network", false, true);
   drawButton(btnAbout, COLOR_YELLOW, COLOR_BLACK, "About", false, true);
 
+  // Show current date/time
   tft.setTextColor(COLOR_GRAY);
   tft.setCursor(30, 280);
   tft.print(formatDateString(now()));
@@ -3071,6 +3779,156 @@ void drawSettingsPanel() {
   tft.print(getCurrentTimeString());
 }
 
+/**
+ * @brief Draw network configuration panel
+ */
+void drawNetworkPanel() {
+  tft.fillScreen(COLOR_BLACK);
+
+  drawButton(btnNetworkBack, COLOR_YELLOW, COLOR_BLACK, "Back", false, true);
+  drawButton(btnNetworkStop, COLOR_YELLOW, COLOR_BLACK, "STOP", false, true);
+
+  tft.setFont(&FreeSansBold12pt7b);
+  tft.setTextColor(COLOR_WHITE);
+  int16_t x1, y1;
+  uint16_t w, h;
+  tft.getTextBounds("Network Settings", 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor((SCREEN_WIDTH - w) / 2, 32);
+  tft.print("Network Settings");
+
+  tft.setFont(&FreeSans9pt7b);
+
+  // Enable LAN setting
+  tft.fillRect(20, 70, 460, 30, COLOR_DARK_ROW1);
+  tft.setTextColor(COLOR_WHITE);
+  tft.setCursor(30, 90);
+  tft.print("Enable LAN:");
+  drawButton(btnEnableLanToggle, COLOR_YELLOW, COLOR_BLACK, networkConfig.enableEthernet ? "ON" : "OFF", false, true);
+
+  // Connection status
+  tft.fillRect(20, 110, 460, 30, COLOR_DARK_ROW2);
+  tft.setTextColor(COLOR_WHITE);
+  tft.setCursor(30, 130);
+  tft.print("Connection:");
+  tft.setTextColor(ethernetConnected ? COLOR_GREEN : COLOR_RED);
+  tft.setCursor(130, 130);
+  tft.print(ethernetConnected ? "Connected" : "Disconnected");
+
+  // Network information (if connected)
+  if (ethernetConnected) {
+    tft.fillRect(20, 150, 460, 30, COLOR_DARK_ROW1);
+    tft.setTextColor(COLOR_WHITE);
+    tft.setCursor(30, 170);
+    tft.print("IP Address:");
+    tft.setTextColor(COLOR_CYAN);
+    tft.setCursor(125, 170);
+    tft.print(ipToString(Ethernet.localIP()));
+
+    tft.fillRect(20, 190, 460, 30, COLOR_DARK_ROW2);
+    tft.setTextColor(COLOR_WHITE);
+    tft.setCursor(30, 210);
+    tft.print("TCP Port:");
+    tft.setTextColor(COLOR_CYAN);
+    tft.setCursor(120, 210);
+    tft.print(networkConfig.tcpPort);
+    tft.setTextColor(COLOR_WHITE);
+    tft.setCursor(200, 210);
+    tft.print("UDP Port:");
+    tft.setTextColor(COLOR_CYAN);
+    tft.setCursor(290, 210);
+    tft.print(networkConfig.udpPort);
+  }
+
+  drawButton(btnNetworkEdit, COLOR_YELLOW, COLOR_BLACK, "Edit", false, true);
+}
+
+/**
+ * @brief Draw network edit configuration panel
+ */
+void drawNetworkEditPanel() {
+  tft.fillScreen(COLOR_BLACK);
+
+  drawButton(btnNetworkEditBack, COLOR_YELLOW, COLOR_BLACK, "Back", false, true);
+  drawButton(btnNetworkEditStop, COLOR_YELLOW, COLOR_BLACK, "STOP", false, true);
+
+  tft.setFont(&FreeSansBold12pt7b);
+  tft.setTextColor(COLOR_WHITE);
+  int16_t x1, y1;
+  uint16_t w, h;
+  tft.getTextBounds("Network Configuration", 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor((SCREEN_WIDTH - w) / 2, 32);
+  tft.print("Network Configuration");
+
+  tft.setFont(&FreeSans9pt7b);
+
+  // DHCP toggle
+  tft.fillRect(20, 70, 460, 30, COLOR_DARK_ROW1);
+  tft.setTextColor(COLOR_WHITE);
+  tft.setCursor(30, 90);
+  tft.print("Use DHCP:");
+  drawButton(btnDhcpToggle, COLOR_YELLOW, COLOR_BLACK, networkConfig.useDHCP ? "ON" : "OFF", false, true);
+
+  // Static IP configuration (if DHCP disabled)
+  if (!networkConfig.useDHCP) {
+    tft.setTextColor(COLOR_WHITE);
+    tft.setCursor(30, 110);
+    tft.print("Static IP:");
+    tft.drawRect(networkFields[0].x, networkFields[0].y, networkFields[0].w, networkFields[0].h, COLOR_YELLOW);
+    tft.setCursor(networkFields[0].x + 5, networkFields[0].y + 18);
+    tft.print(networkFields[0].value);
+
+    tft.setCursor(30, 140);
+    tft.print("Subnet:");
+    tft.drawRect(networkFields[1].x, networkFields[1].y, networkFields[1].w, networkFields[1].h, COLOR_YELLOW);
+    tft.setCursor(networkFields[1].x + 5, networkFields[1].y + 18);
+    tft.print(networkFields[1].value);
+
+    tft.setCursor(30, 170);
+    tft.print("Gateway:");
+    tft.drawRect(networkFields[2].x, networkFields[2].y, networkFields[2].w, networkFields[2].h, COLOR_YELLOW);
+    tft.setCursor(networkFields[2].x + 5, networkFields[2].y + 18);
+    tft.print(networkFields[2].value);
+
+    tft.setCursor(30, 200);
+    tft.print("DNS:");
+    tft.drawRect(networkFields[3].x, networkFields[3].y, networkFields[3].w, networkFields[3].h, COLOR_YELLOW);
+    tft.setCursor(networkFields[3].x + 5, networkFields[3].y + 18);
+    tft.print(networkFields[3].value);
+  }
+
+  // Port configuration
+  tft.setTextColor(COLOR_WHITE);
+  tft.setCursor(30, 230);
+  tft.print("TCP Port:");
+  tft.drawRect(networkFields[4].x, networkFields[4].y, networkFields[4].w, networkFields[4].h, COLOR_YELLOW);
+  tft.setCursor(networkFields[4].x + 5, networkFields[4].y + 18);
+  tft.print(networkFields[4].value);
+
+  tft.setCursor(30, 260);
+  tft.print("UDP Port:");
+  tft.drawRect(networkFields[5].x, networkFields[5].y, networkFields[5].w, networkFields[5].h, COLOR_YELLOW);
+  tft.setCursor(networkFields[5].x + 5, networkFields[5].y + 18);
+  tft.print(networkFields[5].value);
+
+  // Timeout configuration
+  tft.setCursor(30, 290);
+  tft.print("Timeout (ms):");
+  tft.drawRect(networkFields[6].x, networkFields[6].y, networkFields[6].w, networkFields[6].h, COLOR_YELLOW);
+  tft.setCursor(networkFields[6].x + 5, networkFields[6].y + 18);
+  tft.print(networkFields[6].value);
+
+  tft.setCursor(170, 290);
+  tft.print("DHCP Timeout:");
+  tft.drawRect(networkFields[7].x, networkFields[7].y, networkFields[7].w, networkFields[7].h, COLOR_YELLOW);
+  tft.setCursor(networkFields[7].x + 5, networkFields[7].y + 18);
+  tft.print(networkFields[7].value);
+
+  drawButton(btnNetworkEditSave, COLOR_GREEN, COLOR_BLACK, "Save", false, true);
+}
+
+/**
+ * @brief Draw about/information page
+ */
 void drawAboutPage() {
   tft.fillScreen(COLOR_BLACK);
 
@@ -3101,23 +3959,28 @@ void drawAboutPage() {
   tft.print("Copyright (c) 2025 Aram Aprahamian");
 
   tft.setCursor(30, 145);
-  tft.print("Permission is hereby granted, free of charge, to any person");
+  tft.print("Permission is hereby granted, free of charge, to any ");
   tft.setCursor(30, 160);
-  tft.print("obtaining a copy of this software and associated documentation");
+  tft.print("person obtaining a copy of this software and associated");
   tft.setCursor(30, 175);
-  tft.print("files (the \"Software\"), to deal in the Software without");
+  tft.print("documentation files (the \"Software\"), to deal in the");
   tft.setCursor(30, 190);
-  tft.print("restriction, including without limitation the rights to use,");
+  tft.print("Software without restriction, including without limitation");
   tft.setCursor(30, 205);
-  tft.print("copy, modify, merge, publish, distribute, sublicense, and/or");
+  tft.print("the rights to use, copy, modify, merge, publish,");
   tft.setCursor(30, 220);
-  tft.print("sell copies of the Software, and to permit persons to whom");
+  tft.print("distribute, sublicense, and/or sell copies of the Software,");
   tft.setCursor(30, 235);
-  tft.print("the Software is furnished to do so, subject to the above");
+  tft.print("and to permit persons to whom the Software is");
   tft.setCursor(30, 250);
-  tft.print("copyright notice being included in all copies.");
+  tft.print("furnished to do so, subject to the above copyright");
+  tft.setCursor(30, 265);
+  tft.print("notice being included in all copies.");
 }
 
+/**
+ * @brief Draw keypad input panel
+ */
 void drawKeypadPanel() {
   tft.fillScreen(COLOR_BLACK);
 
@@ -3125,6 +3988,7 @@ void drawKeypadPanel() {
   tft.setTextColor(COLOR_WHITE);
   tft.setCursor(40, 50);
 
+  // Display appropriate prompt based on keypad mode
   switch (keypadMode) {
     case KEYPAD_UPDATE_RATE:
       tft.print("Enter Update Rate (ms):");
@@ -3147,22 +4011,36 @@ void drawKeypadPanel() {
     case KEYPAD_SCRIPT_SEARCH:
       tft.print("Enter Script Number:");
       break;
+    case KEYPAD_NETWORK_IP:
+      tft.print("Enter IP Address:");
+      break;
+    case KEYPAD_NETWORK_PORT:
+      tft.print("Enter Port Number:");
+      break;
+    case KEYPAD_NETWORK_TIMEOUT:
+      tft.print("Enter Timeout (ms):");
+      break;
     default:
       tft.print("Enter Value:");
       break;
   }
 
+  // Display current input
   tft.setFont(&FreeMonoBold9pt7b);
   tft.setCursor(40, 90);
   tft.print(keypadBuffer);
 
+  // Display help text
   tft.setFont(&FreeSans9pt7b);
   tft.setCursor(40, 160);
 
   if (keypadMode == KEYPAD_DEVICE_ON_TIME || keypadMode == KEYPAD_DEVICE_OFF_TIME ||
       keypadMode == KEYPAD_SCRIPT_TSTART || keypadMode == KEYPAD_SCRIPT_TEND ||
-      keypadMode == KEYPAD_UPDATE_RATE || keypadMode == KEYPAD_FAN_SPEED) {
+      keypadMode == KEYPAD_UPDATE_RATE || keypadMode == KEYPAD_FAN_SPEED ||
+      keypadMode == KEYPAD_NETWORK_PORT || keypadMode == KEYPAD_NETWORK_TIMEOUT) {
     tft.print("*=Backspace, #=+/-, A=Enter, B=Back, C=Clear");
+  } else if (keypadMode == KEYPAD_NETWORK_IP) {
+    tft.print("*=Backspace, .=Decimal, A=Enter, B=Back, C=Clear");
   } else {
     tft.print("A=Enter, B=Back, *=Clear");
   }
@@ -3177,6 +4055,9 @@ void drawKeypadPanel() {
   drawButton(btnKeypadBack, COLOR_YELLOW, COLOR_BLACK, "Back");
 }
 
+/**
+ * @brief Draw script execution page
+ */
 void drawScriptPage() {
   tft.fillScreen(COLOR_BLACK);
 
@@ -3186,6 +4067,7 @@ void drawScriptPage() {
   tft.setTextColor(COLOR_WHITE);
   char buff[64];
 
+  // Display script name and status
   if (!isScriptRunning) {
     tft.setFont(&FreeSansBold12pt7b);
     snprintf(buff, sizeof(buff), "%s", currentScript.scriptName);
@@ -3218,6 +4100,7 @@ void drawScriptPage() {
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(COLOR_WHITE);
 
+  // Script configuration table
   tft.setCursor(10, 70);
   tft.print("Name");
   tft.setCursor(80, 70);
@@ -3256,6 +4139,7 @@ void drawScriptPage() {
 
   tft.drawLine(10, baseY + 6 * rowHeight + 10, divX - 10, baseY + 6 * rowHeight + 10, COLOR_GRAY);
 
+  // Script parameters
   int configY = baseY + 6 * rowHeight + 25;
   tft.setCursor(10, configY);
   tft.print("Start: ");
@@ -3265,6 +4149,7 @@ void drawScriptPage() {
   tft.print("  Record: ");
   tft.print(currentScript.useRecord ? "Yes" : "No");
 
+  // Device status display
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(COLOR_YELLOW);
   tft.setCursor(divX + 10, 60);
@@ -3285,10 +4170,11 @@ void drawScriptPage() {
     if (inaIdx >= 0) {
       tft.setCursor(divX + 10, yPos + 15);
       tft.setTextColor(COLOR_CYAN);
-      tft.printf("%.1fV %.0fmA", deviceVoltage[inaIdx], deviceCurrent[inaIdx]);
+      tft.printf("%.1fV %.2fA", deviceVoltage[inaIdx], deviceCurrent[inaIdx] / 1000.0);
     }
   }
 
+  // Control buttons
   drawButton(btnScriptLoad, COLOR_YELLOW, COLOR_BLACK, "Load");
   drawButton(btnScriptEdit, COLOR_YELLOW, COLOR_BLACK, "Edit");
 
@@ -3309,12 +4195,16 @@ void drawScriptPage() {
   }
 }
 
+/**
+ * @brief Draw script edit page
+ */
 void drawEditPage() {
   tft.fillScreen(COLOR_BLACK);
 
   drawButton(btnEditBack, COLOR_YELLOW, COLOR_BLACK, "Back");
   drawButton(btnEditStop, COLOR_YELLOW, COLOR_BLACK, "STOP");
 
+  // Script name display
   tft.setFont(&FreeSansBold12pt7b);
   tft.setTextColor(COLOR_WHITE);
   int16_t x1, y1;
@@ -3331,6 +4221,7 @@ void drawEditPage() {
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(COLOR_WHITE);
 
+  // Device configuration table
   tft.setCursor(10, 70);
   tft.print("Name");
   tft.setCursor(80, 70);
@@ -3351,6 +4242,7 @@ void drawEditPage() {
     tft.setCursor(10, yPos + 15);
     tft.print(switchOutputs[i].name);
 
+    // ON time field
     int fieldX = 80;
     int fieldW = 50;
     int fieldH = 25;
@@ -3368,6 +4260,7 @@ void drawEditPage() {
     deviceFields[numDeviceFields].fieldType = 0;
     numDeviceFields++;
 
+    // OFF time field
     fieldX = 140;
     tft.drawRect(fieldX, yPos, fieldW, fieldH, COLOR_YELLOW);
     snprintf(buf, sizeof(buf), "%d", currentScript.devices[i].offTime);
@@ -3382,6 +4275,7 @@ void drawEditPage() {
     deviceFields[numDeviceFields].fieldType = 1;
     numDeviceFields++;
 
+    // Enable checkbox
     fieldX = 200;
     fieldW = 25;
     tft.drawRect(fieldX, yPos, fieldW, fieldH, COLOR_YELLOW);
@@ -3400,6 +4294,7 @@ void drawEditPage() {
 
   numEditFields = 0;
 
+  // Script parameters
   tft.setCursor(divX + 10, 70);
   tft.print("T_START:");
 
@@ -3455,7 +4350,9 @@ void drawEditPage() {
   drawButton(btnEditNew, COLOR_YELLOW, COLOR_BLACK, "New");
 }
 
-// FIXED: Script load page with alternating row backgrounds
+/**
+ * @brief Draw script load page with alternating row backgrounds
+ */
 void drawScriptLoadPage() {
   tft.fillScreen(COLOR_BLACK);
 
@@ -3485,7 +4382,7 @@ void drawScriptLoadPage() {
     int yPos = yOffset + i * lineHeight;
     int scriptIdx = scriptListOffset + i;
 
-    // FIXED: Alternating row backgrounds
+    // Alternating row backgrounds
     uint16_t rowColor = (i % 2 == 0) ? COLOR_LIST_ROW1 : COLOR_LIST_ROW2;
     tft.fillRect(15, yPos - 2, 400, lineHeight, rowColor);
 
@@ -3508,6 +4405,7 @@ void drawScriptLoadPage() {
     tft.setTextColor(COLOR_WHITE);
   }
 
+  // Scroll indicators
   if (numScripts > 10) {
     if (scriptListOffset > 0) {
       tft.fillTriangle(450, 70, 440, 80, 460, 80, COLOR_YELLOW);
@@ -3518,10 +4416,9 @@ void drawScriptLoadPage() {
     }
   }
 
-  // FIXED: Remove search box - now using direct keypad input
   tft.setTextColor(COLOR_GRAY);
-  tft.setCursor(120, 300);
-  tft.print("Press 1-9 to select script");
+  tft.setCursor(80, 300);
+  tft.print("Press 1-9 to select, A to load script");
 
   if (selectedScript >= 0) {
     drawButton(btnScriptSelect, COLOR_GREEN, COLOR_BLACK, "Select", false, true);
@@ -3529,6 +4426,9 @@ void drawScriptLoadPage() {
   }
 }
 
+/**
+ * @brief Draw delete confirmation dialog
+ */
 void drawDeleteConfirmDialog() {
   tft.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
 
@@ -3548,6 +4448,9 @@ void drawDeleteConfirmDialog() {
   drawButton(btnDeleteNo, COLOR_YELLOW, COLOR_BLACK, "No", false, true);
 }
 
+/**
+ * @brief Draw script save page with T9 input
+ */
 void drawEditSavePage() {
   tft.fillScreen(COLOR_BLACK);
   drawButton(btnEditSaveBack, COLOR_YELLOW, COLOR_BLACK, "Back");
@@ -3593,6 +4496,9 @@ void drawEditSavePage() {
   tft.print(capsMode ? "ON" : "OFF");
 }
 
+/**
+ * @brief Draw date and time setting panel
+ */
 void drawDateTimePanel() {
   tft.fillScreen(COLOR_BLACK);
 
@@ -3616,127 +4522,57 @@ void drawDateTimePanel() {
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(COLOR_WHITE);
 
-  // Year
-  tft.setCursor(50, 80);
-  tft.print("Year:");
-  tft.fillRect(150, 70, 30, 30, COLOR_GRAY);
-  tft.drawRect(150, 70, 30, 30, COLOR_BLACK);
-  tft.setTextColor(COLOR_BLACK);
-  tft.setCursor(158, 90);
-  tft.print("-");
+  // Date/time fields with +/- buttons
+  struct DateTimeControl {
+    int yPos;
+    const char* label;
+    int value;
+  };
 
-  tft.fillRect(180, 70, 60, 30, COLOR_YELLOW);
-  tft.drawRect(180, 70, 60, 30, COLOR_BLACK);
-  tft.setCursor(190, 90);
-  tft.print("20");
-  tft.print(tmSet.Year);
+  DateTimeControl controls[] = {
+    {70, "Year:", 2000 + tmSet.Year},
+    {110, "Month:", tmSet.Month},
+    {150, "Day:", tmSet.Day},
+    {190, "Hour:", tmSet.Hour},
+    {230, "Minute:", tmSet.Minute},
+    {270, "Second:", tmSet.Second}
+  };
 
-  tft.fillRect(240, 70, 30, 30, COLOR_GRAY);
-  tft.drawRect(240, 70, 30, 30, COLOR_BLACK);
-  tft.setCursor(248, 90);
-  tft.print("+");
+  for (int i = 0; i < 6; i++) {
+    tft.setCursor(50, controls[i].yPos + 10);
+    tft.print(controls[i].label);
+    
+    // Decrement button
+    tft.fillRect(150, controls[i].yPos, 30, 30, COLOR_GRAY);
+    tft.drawRect(150, controls[i].yPos, 30, 30, COLOR_BLACK);
+    tft.setTextColor(COLOR_BLACK);
+    tft.setCursor(158, controls[i].yPos + 20);
+    tft.print("-");
 
-  // Month
-  tft.setTextColor(COLOR_WHITE);
-  tft.setCursor(50, 120);
-  tft.print("Month:");
-  tft.fillRect(150, 110, 30, 30, COLOR_GRAY);
-  tft.drawRect(150, 110, 30, 30, COLOR_BLACK);
-  tft.setTextColor(COLOR_BLACK);
-  tft.setCursor(158, 130);
-  tft.print("-");
+    // Value display
+    tft.fillRect(180, controls[i].yPos, 60, 30, COLOR_YELLOW);
+    tft.drawRect(180, controls[i].yPos, 60, 30, COLOR_BLACK);
+    tft.setCursor(190, controls[i].yPos + 20);
+    if (i == 0) {
+      tft.print(controls[i].value);
+    } else {
+      tft.print(controls[i].value);
+    }
 
-  tft.fillRect(180, 110, 60, 30, COLOR_YELLOW);
-  tft.drawRect(180, 110, 60, 30, COLOR_BLACK);
-  tft.setCursor(195, 130);
-  tft.print(tmSet.Month);
+    // Increment button
+    tft.fillRect(240, controls[i].yPos, 30, 30, COLOR_GRAY);
+    tft.drawRect(240, controls[i].yPos, 30, 30, COLOR_BLACK);
+    tft.setCursor(248, controls[i].yPos + 20);
+    tft.print("+");
 
-  tft.fillRect(240, 110, 30, 30, COLOR_GRAY);
-  tft.drawRect(240, 110, 30, 30, COLOR_BLACK);
-  tft.setCursor(248, 130);
-  tft.print("+");
-
-  // Day
-  tft.setTextColor(COLOR_WHITE);
-  tft.setCursor(50, 160);
-  tft.print("Day:");
-  tft.fillRect(150, 150, 30, 30, COLOR_GRAY);
-  tft.drawRect(150, 150, 30, 30, COLOR_BLACK);
-  tft.setTextColor(COLOR_BLACK);
-  tft.setCursor(158, 170);
-  tft.print("-");
-
-  tft.fillRect(180, 150, 60, 30, COLOR_YELLOW);
-  tft.drawRect(180, 150, 60, 30, COLOR_BLACK);
-  tft.setCursor(195, 170);
-  tft.print(tmSet.Day);
-
-  tft.fillRect(240, 150, 30, 30, COLOR_GRAY);
-  tft.drawRect(240, 150, 30, 30, COLOR_BLACK);
-  tft.setCursor(248, 170);
-  tft.print("+");
-
-  // Hour
-  tft.setTextColor(COLOR_WHITE);
-  tft.setCursor(50, 200);
-  tft.print("Hour:");
-  tft.fillRect(150, 190, 30, 30, COLOR_GRAY);
-  tft.drawRect(150, 190, 30, 30, COLOR_BLACK);
-  tft.setTextColor(COLOR_BLACK);
-  tft.setCursor(158, 210);
-  tft.print("-");
-
-  tft.fillRect(180, 190, 60, 30, COLOR_YELLOW);
-  tft.drawRect(180, 190, 60, 30, COLOR_BLACK);
-  tft.setCursor(195, 210);
-  tft.print(tmSet.Hour);
-
-  tft.fillRect(240, 190, 30, 30, COLOR_GRAY);
-  tft.drawRect(240, 190, 30, 30, COLOR_BLACK);
-  tft.setCursor(248, 210);
-  tft.print("+");
-
-  // Minute
-  tft.setTextColor(COLOR_WHITE);
-  tft.setCursor(50, 240);
-  tft.print("Minute:");
-  tft.fillRect(150, 230, 30, 30, COLOR_GRAY);
-  tft.drawRect(150, 230, 30, 30, COLOR_BLACK);
-  tft.setTextColor(COLOR_BLACK);
-  tft.setCursor(158, 250);
-  tft.print("-");
-
-  tft.fillRect(180, 230, 60, 30, COLOR_YELLOW);
-  tft.drawRect(180, 230, 60, 30, COLOR_BLACK);
-  tft.setCursor(195, 250);
-  tft.print(tmSet.Minute);
-
-  tft.fillRect(240, 230, 30, 30, COLOR_GRAY);
-  tft.drawRect(240, 230, 30, 30, COLOR_BLACK);
-  tft.setCursor(248, 250);
-  tft.print("+");
-
-  // Second
-  tft.setTextColor(COLOR_WHITE);
-  tft.setCursor(50, 280);
-  tft.print("Second:");
-  tft.fillRect(150, 270, 30, 30, COLOR_GRAY);
-  tft.drawRect(150, 270, 30, 30, COLOR_BLACK);
-  tft.setTextColor(COLOR_BLACK);
-  tft.setCursor(158, 290);
-  tft.print("-");
-
-  tft.fillRect(180, 270, 60, 30, COLOR_YELLOW);
-  tft.drawRect(180, 270, 60, 30, COLOR_BLACK);
-  tft.setCursor(195, 290);
-  tft.print(tmSet.Second);
-
-  tft.fillRect(240, 270, 30, 30, COLOR_GRAY);
-  tft.drawRect(240, 270, 30, 30, COLOR_BLACK);
-  tft.setCursor(248, 290);
-  tft.print("+");
+    tft.setTextColor(COLOR_WHITE);
+  }
 }
 
+/**
+ * @brief Draw individual device row in main display
+ * @param row Device row index
+ */
 void drawDeviceRow(int row) {
   int yPos = 85 + row * 25;
   bool isOn = (switchOutputs[row].state == HIGH);
@@ -3747,7 +4583,7 @@ void drawDeviceRow(int row) {
     tft.fillRect(0, yPos - 17, SCREEN_WIDTH, 25, COLOR_PURPLE);
   }
 
-  uint16_t textColor = isOn ? COLOR_WHITE : COLOR_WHITE;
+  uint16_t textColor = COLOR_WHITE;
 
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(textColor);
@@ -3757,8 +4593,6 @@ void drawDeviceRow(int row) {
 
   int inaIdx = getInaIndexForSwitch(row);
   if (inaIdx >= 0) {
-    tft.setTextColor(isOn ? COLOR_WHITE : COLOR_WHITE);
-
     tft.setCursor(100, yPos);
     tft.printf("%.2fV", deviceVoltage[inaIdx]);
 
@@ -3770,27 +4604,11 @@ void drawDeviceRow(int row) {
   }
 }
 
+/**
+ * @brief Draw total/bus power row
+ */
 void drawTotalRow() {
   int totalRowY = 85 + numSwitches * 25 + 15;
-
-  float totalVoltage = 0;
-  float totalCurrent = 0;
-  float totalPower = 0;
-  int activeDevices = 0;
-
-  for (int i = 0; i < numSwitches; i++) {
-    int inaIdx = getInaIndexForSwitch(i);
-    if (inaIdx >= 0 && switchOutputs[i].state == HIGH) {
-      totalVoltage += deviceVoltage[inaIdx];
-      totalCurrent += deviceCurrent[inaIdx];
-      totalPower += devicePower[inaIdx];
-      activeDevices++;
-    }
-  }
-
-  if (activeDevices > 0) {
-    totalVoltage /= activeDevices;
-  }
 
   tft.fillRect(0, totalRowY - 17, SCREEN_WIDTH, 25, COLOR_BLACK);
 
@@ -3798,18 +4616,23 @@ void drawTotalRow() {
   tft.setTextColor(COLOR_YELLOW);
 
   tft.setCursor(10, totalRowY);
-  tft.print("Total");
+  tft.print("Bus");
 
+  // Use ina_all device (index 6) for total readings
   tft.setCursor(100, totalRowY);
-  tft.printf("%.2fV", totalVoltage);
+  tft.printf("%.2fV", deviceVoltage[6]);
 
   tft.setCursor(180, totalRowY);
-  tft.printf("%.4fA", totalCurrent / 1000.0);
+  tft.printf("%.4fA", deviceCurrent[6] / 1000.0);
 
   tft.setCursor(260, totalRowY);
-  tft.printf("%.3fW", totalPower);
+  tft.printf("%.3fW", devicePower[6]);
 }
 
+/**
+ * @brief Update live value display for specific device row
+ * @param row Device row index
+ */
 void updateLiveValueRow(int row) {
   if (currentMode != MODE_MAIN && currentMode != MODE_SCRIPT) return;
 
@@ -3837,11 +4660,14 @@ void updateLiveValueRow(int row) {
     if (inaIdx >= 0) {
       tft.setCursor(divX + 10, yPos + 15);
       tft.setTextColor(COLOR_CYAN);
-      tft.printf("%.1fV %.0fmA", deviceVoltage[inaIdx], deviceCurrent[inaIdx]);
+      tft.printf("%.1fV %.2fA", deviceVoltage[inaIdx], deviceCurrent[inaIdx] / 1000.0);
     }
   }
 }
 
+/**
+ * @brief Refresh header clock display
+ */
 void refreshHeaderClock() {
   if (currentMode != MODE_MAIN && currentMode != MODE_SCRIPT) return;
 
@@ -3878,7 +4704,8 @@ void refreshHeaderClock() {
     }
   }
 
-  int16_t x1,y1; uint16_t w,h;
+  int16_t x1,y1; 
+  uint16_t w,h;
   tft.getTextBounds(buff, 0, 0, &x1, &y1, &w, &h);
   int tx = (SCREEN_WIDTH - w) / 2;
   int clearX = max(0, tx - 10);
@@ -3888,6 +4715,9 @@ void refreshHeaderClock() {
   tft.print(buff);
 }
 
+/**
+ * @brief Update lock button appearance
+ */
 void updateLockButton() {
   drawButton(btnLock,
              lock ? COLOR_PURPLE : COLOR_YELLOW,
@@ -3897,11 +4727,13 @@ void updateLockButton() {
              btnLock.enabled);
 }
 
-// ==================== Helpers ====================
-bool touchInButton(int16_t x, int16_t y, const ButtonRegion& btn) {
-  return btn.enabled && (x >= btn.x && x <= btn.x+btn.w && y >= btn.y && y <= btn.y+btn.h);
-}
+// ==================== Utility Functions ====================
 
+/**
+ * @brief Get INA226 index for switch index
+ * @param switchIdx Switch index
+ * @return INA226 index or -1 if not found
+ */
 int getInaIndexForSwitch(int switchIdx) {
   const char* name = switchOutputs[switchIdx].name;
   for (int i=0; i<numIna; i++) {
@@ -3910,6 +4742,9 @@ int getInaIndexForSwitch(int switchIdx) {
   return -1;
 }
 
+/**
+ * @brief Turn off all output relays
+ */
 void setAllOutputsOff() {
   for (int i=0; i<numSwitches; i++) {
     digitalWrite(switchOutputs[i].outputPin, LOW);
@@ -3919,6 +4754,9 @@ void setAllOutputsOff() {
   }
 }
 
+/**
+ * @brief Synchronize outputs to physical switch positions
+ */
 void syncOutputsToSwitches() {
   for (int i=0; i<numSwitches; i++) {
     if (switchOutputs[i].switchPin == -1) {
@@ -3937,199 +4775,208 @@ void syncOutputsToSwitches() {
   }
 }
 
+/**
+ * @brief Apply fan settings to hardware
+ */
 void applyFanSettings() {
-  analogWrite(FAN_PWM_PIN, (fanOn ? fanSpeed : 0));
+  analogWrite(FAN_PWM_PIN, fanOn ? fanSpeed : 0);
 }
 
+/**
+ * @brief Apply update rate (placeholder function)
+ */
 void applyUpdateRate() {
-  // Just uses updateRate in loop
+  // Update rate is used directly in main loop
 }
 
+/**
+ * @brief Apply dark mode display setting
+ */
 void applyDarkMode() {
   tft.invertDisplay(darkMode);
   Serial.print("Dark mode: ");
   Serial.println(darkMode ? "ON" : "OFF");
 }
 
-void startRecording(bool scriptRequested) {
-  if (recording) return;
+/**
+ * @brief Find switch index by device name
+ * @param deviceName Device name string
+ * @return Switch index or -1 if not found
+ */
+int findSwitchIndex(String deviceName) {
+  if (deviceName == "gse1") deviceName = "gse-1";
+  else if (deviceName == "gse2") deviceName = "gse-2";
+  else if (deviceName == "ter") deviceName = "te-r";
+  else if (deviceName == "te1") deviceName = "te-1";
+  else if (deviceName == "te2") deviceName = "te-2";
+  else if (deviceName == "te3") deviceName = "te-3";
 
-  ensureExternalSDContext();
-
-  if (!SD.begin(SD_CS)) {
-    Serial.println("Cannot initialize external SD card");
-    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "NO SD", false, false);
-    delay(100);
-    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "RECORD", false, false);
-    return;
-  }
-
-  File root = SD.open("/");
-  if (!root) {
-    Serial.println("External SD card not accessible");
-    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "SD ERR", false, false);
-    delay(100);
-    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "RECORD", false, false);
-    return;
-  }
-  root.close();
-
-  // FIXED: Use script-based filename when recording from script
-  if (scriptRequested && strlen(currentScript.scriptName) > 0) {
-    generateScriptFilename(recordFilename, sizeof(recordFilename), currentScript.scriptName);
-  } else {
-    if (csvOutput) {
-      nextAvailableFilename(recordFilename, sizeof(recordFilename));
-      strcpy(recordFilename + strlen(recordFilename) - 5, ".csv");
-    } else {
-      nextAvailableFilename(recordFilename, sizeof(recordFilename));
+  for (int i=0; i<numSwitches; i++) {
+    String swName = String(switchOutputs[i].name);
+    swName.toLowerCase();
+    if (swName == deviceName) {
+      return i;
     }
   }
+  return -1;
+}
 
-  logFile = SD.open(recordFilename, FILE_WRITE);
-  if (!logFile) {
-    Serial.println("Failed to create log file on external SD");
-    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "SD ERR", false, false);
-    delay(100);
-    drawButton(btnRecord, COLOR_GRAY, COLOR_WHITE, "RECORD", false, false);
+/**
+ * @brief Set output state by device name
+ * @param deviceName Device name
+ * @param state Desired output state
+ */
+void setOutputState(String deviceName, bool state) {
+  if (lock || safetyStop || isScriptRunning) {
+    Serial.println("Cannot change outputs - system is locked, in safety stop, or script is running");
     return;
   }
+  int switchIndex = findSwitchIndex(deviceName);
+  if (switchIndex >= 0) {
+    digitalWrite(switchOutputs[switchIndex].outputPin, state ? HIGH : LOW);
+    switchOutputs[switchIndex].state = state ? HIGH : LOW;
+    if (currentMode == MODE_MAIN) drawDeviceRow(switchIndex);
+    if (currentMode == MODE_SCRIPT) updateLiveValueRow(switchIndex);
 
-  recordingScript = scriptRequested;
+    Serial.print(switchOutputs[switchIndex].name);
+    Serial.print(" turned ");
+    Serial.println(state ? "ON" : "OFF");
+  } else {
+    Serial.print("Unknown device: ");
+    Serial.println(deviceName);
+    Serial.println("Available devices: gse1, gse2, ter, te1, te2, te3");
+  }
+}
 
+/**
+ * @brief Print current system status to serial
+ */
+void printCurrentStatus() {
   if (csvOutput) {
-    logFile.print("Time");
-    for (int i = 0; i < numSwitches; i++) {
-      logFile.print(",");
-      logFile.print(switchOutputs[i].name);
-      logFile.print("_State,");
-      logFile.print(switchOutputs[i].name);
-      logFile.print("_Voltage,");
-      logFile.print(switchOutputs[i].name);
-      logFile.print("_Current,");
-      logFile.print(switchOutputs[i].name);
-      logFile.print("_Power");
+    if (!csvHeaderWritten) {
+      Serial.print("Time,");
+      for (int i=0; i<numSwitches; i++) {
+        Serial.print(switchOutputs[i].name);
+        Serial.print("_State,");
+        Serial.print(switchOutputs[i].name);
+        Serial.print("_Voltage,");
+        Serial.print(switchOutputs[i].name);
+        Serial.print("_Current,");
+        Serial.print(switchOutputs[i].name);
+        Serial.print("_Power");
+        if (i < numSwitches-1) Serial.print(",");
+      }
+      Serial.println();
+      csvHeaderWritten = true;
     }
-    logFile.println();
+    Serial.print(millis());
+    Serial.print(",");
+    for (int i=0; i<numSwitches; i++) {
+      int inaIdx = getInaIndexForSwitch(i);
+      Serial.print(switchOutputs[i].state ? "1":"0");
+      Serial.print(",");
+      Serial.print(inaIdx>=0?deviceVoltage[inaIdx]:0,4);
+      Serial.print(",");
+      Serial.print(inaIdx>=0?(deviceCurrent[inaIdx]/1000.0):0,4);
+      Serial.print(",");
+      Serial.print(inaIdx>=0?devicePower[inaIdx]:0,4);
+      if (i < numSwitches-1) Serial.print(",");
+    }
+    Serial.println();
   } else {
-    // FIXED: Enhanced JSON header with detailed script information
-    logFile.print("{\n");
-    logFile.print("\"using_script\":");
-    logFile.print(scriptRequested ? "1" : "0");
-    logFile.print(",\n");
-
-    if (scriptRequested) {
-      logFile.print("\"script_config\":{\n");
-      logFile.print("\"name\":\"");
-      logFile.print(currentScript.scriptName);
-      logFile.print("\",\n\"tstart\":");
-      logFile.print(currentScript.tStart);
-      logFile.print(",\"tend\":");
-      logFile.print(currentScript.tEnd);
-      logFile.print(",\"record\":");
-      logFile.print(currentScript.useRecord ? "true" : "false");
-      logFile.print(",\n\"devices\":[\n");
-
-      // FIXED: Include detailed device configuration
-      for (int i = 0; i < 6; i++) {
-        if (i > 0) logFile.print(",\n");
-        logFile.print("{\"name\":\"");
-        logFile.print(switchOutputs[i].name);
-        logFile.print("\",\"enabled\":");
-        logFile.print(currentScript.devices[i].enabled ? "true" : "false");
-        logFile.print(",\"onTime\":");
-        logFile.print(currentScript.devices[i].onTime);
-        logFile.print(",\"offTime\":");
-        logFile.print(currentScript.devices[i].offTime);
-        logFile.print("}");
-      }
-
-      logFile.print("\n],\n\"script_ended_early\":false");
-      logFile.print("\n},\n");
-    } else {
-      logFile.print("\"script_config\":null,\n");
+    Serial.println("=== Current Status ===");
+    Serial.print("System Lock: ");
+    Serial.println(lock ? "LOCKED":"UNLOCKED");
+    Serial.print("Safety Stop: ");
+    Serial.println(safetyStop ? "ACTIVE":"INACTIVE");
+    Serial.print("Recording: ");
+    Serial.println(recording ? "ACTIVE":"INACTIVE");
+    Serial.print("Script Running: ");
+    Serial.println(isScriptRunning ? "YES":"NO");
+    Serial.print("Output Format: ");
+    Serial.println(csvOutput ? "CSV":"Human Readable");
+    Serial.print("Dark Mode: ");
+    Serial.println(darkMode ? "ON":"OFF");
+    Serial.print("External SD: ");
+    Serial.println(sdAvailable ? "Available":"Not Available");
+    Serial.print("Internal SD: ");
+    Serial.println(internalSdAvailable ? "Available":"Not Available");
+    Serial.print("SD Check Interval: ");
+    Serial.print(SD_CHECK_INTERVAL);
+    Serial.println("ms");
+    Serial.print("Ethernet Enabled: ");
+    Serial.println(networkConfig.enableEthernet ? "YES":"NO");
+    Serial.print("Ethernet Connected: ");
+    Serial.println(ethernetConnected ? "YES":"NO");
+    if (ethernetConnected) {
+      Serial.print("IP Address: ");
+      Serial.println(ipToString(Ethernet.localIP()));
+      Serial.print("TCP Port: ");
+      Serial.println(networkConfig.tcpPort);
+      Serial.print("UDP Port: ");
+      Serial.println(networkConfig.udpPort);
     }
+    Serial.println();
 
-    time_t nowT = now();
-    logFile.print("\"timestamp\":\"");
-    logFile.print(formatTimeHHMMSS(nowT));
-    logFile.print("\",\n");
-    logFile.print("\"data\":[\n");
-  }
-
-  logFile.flush();
-
-  recording = true;
-  recordStartMillis = millis();
-  firstDataPoint = true;
-  btnRecord.label = "RECORDING";
-
-  if (currentMode == MODE_MAIN) {
-    drawButton(btnRecord, COLOR_RECORDING, COLOR_WHITE, "RECORDING", false, true);
-  }
-
-  Serial.print("Recording started: ");
-  Serial.println(recordFilename);
-}
-
-void stopRecording() {
-  if (!recording) return;
-
-  Serial.println("Stopping recording...");
-
-  ensureExternalSDContext();
-
-  recording = false;
-  bool wasScriptRecording = recordingScript;
-  recordingScript = false;
-
-  if (logFile) {
-    if (!csvOutput) {
-      long durationSec = (millis() - recordStartMillis) / 1000;
-      logFile.print("\n],\n");
-      logFile.print("\"duration_sec\":");
-      logFile.print(durationSec);
-
-      // FIXED: Add script ending information
-      if (wasScriptRecording) {
-        logFile.print(",\n\"script_ended_early\":");
-        logFile.print(scriptEndedEarly ? "true" : "false");
+    for (int i=0; i<numSwitches; i++) {
+      int inaIdx = getInaIndexForSwitch(i);
+      Serial.print(switchOutputs[i].name);
+      Serial.print(": ");
+      Serial.print(switchOutputs[i].state ? "ON":"OFF");
+      if (inaIdx >= 0) {
+        Serial.print(" | V=");
+        Serial.print(deviceVoltage[inaIdx], 2);
+        Serial.print("V | I=");
+        Serial.print(deviceCurrent[inaIdx] / 1000.0, 3);
+        Serial.print("A | P=");
+        Serial.print(devicePower[inaIdx], 3);
+        Serial.print("W");
       }
-
-      logFile.print("\n}");
+      Serial.println();
     }
-    logFile.flush();
-    logFile.close();
-    Serial.println("Recording stopped and file closed successfully");
-  }
-
-  btnRecord.label = "RECORD";
-  if (currentMode == MODE_MAIN) {
-    drawButton(btnRecord, sdAvailable ? COLOR_RECORD : COLOR_GRAY, COLOR_WHITE, "RECORD", false, sdAvailable);
+    Serial.println("===================");
   }
 }
 
-// ==================== EEPROM & Settings ====================
-void saveSettingsToEEPROM() {
-  EEPROM.put(EEPROM_FAN_ON_ADDR, fanOn);
-  EEPROM.put(EEPROM_FAN_SPEED_ADDR, fanSpeed);
-  EEPROM.put(EEPROM_UPDATE_RATE_ADDR, updateRate);
-  EEPROM.put(EEPROM_TIME_FORMAT_ADDR, use24HourFormat);
-  EEPROM.put(EEPROM_DARK_MODE_ADDR, darkMode);
+/**
+ * @brief Print help information to serial
+ */
+void printHelp() {
+  Serial.println("=== Available Commands ===");
+  Serial.println("Output Control:");
+  Serial.println("  gse1 on/off  - Control GSE-1 output");
+  Serial.println("  gse2 on/off  - Control GSE-2 output");
+  Serial.println("  ter on/off   - Control TE-R output");
+  Serial.println("  te1 on/off   - Control TE-1 output");
+  Serial.println("  te2 on/off   - Control TE-2 output");
+  Serial.println("  te3 on/off   - Control TE-3 output");
+  Serial.println();
+  Serial.println("System Control:");
+  Serial.println("  lock         - Lock all outputs");
+  Serial.println("  unlock       - Unlock outputs");
+  Serial.println("  start log    - Start data logging");
+  Serial.println("  stop log     - Stop data logging");
+  Serial.println("  refresh sd   - Manually refresh SD card status");
+  Serial.println();
+  Serial.println("Output Format:");
+  Serial.println("  csv on       - Enable CSV output format");
+  Serial.println("  csv off      - Enable human readable format");
+  Serial.println();
+  Serial.println("Information:");
+  Serial.println("  status       - Show current system status");
+  Serial.println("  help         - Show this help message");
+  Serial.println();
+  Serial.println("Network Commands (JSON format):");
+  Serial.println("  {\"cmd\":\"get_status\"}");
+  Serial.println("  {\"cmd\":\"start_stream\",\"interval\":100}");
+  Serial.println("  {\"cmd\":\"set_output\",\"device\":\"GSE-1\",\"state\":true}");
+  Serial.println("========================");
 }
 
-void loadSettingsFromEEPROM() {
-  EEPROM.get(EEPROM_FAN_ON_ADDR, fanOn);
-  EEPROM.get(EEPROM_FAN_SPEED_ADDR, fanSpeed);
-  EEPROM.get(EEPROM_UPDATE_RATE_ADDR, updateRate);
-  EEPROM.get(EEPROM_TIME_FORMAT_ADDR, use24HourFormat);
-  EEPROM.get(EEPROM_DARK_MODE_ADDR, darkMode);
-
-  if (fanSpeed < 50 || fanSpeed > 255) fanSpeed = 255;
-  if (updateRate < 10 || updateRate > 5000) updateRate = 100;
-}
-
-// ==================== Serial Command Processing ====================
+/**
+ * @brief Handle legacy text commands
+ * @param command Command string
+ */
 void handleCommand(String command) {
   command.trim();
   command.toLowerCase();
@@ -4198,163 +5045,34 @@ void handleCommand(String command) {
   }
 }
 
-void setOutputState(String deviceName, bool state) {
-  if (lock || safetyStop || isScriptRunning) {
-    Serial.println("Cannot change outputs - system is locked, in safety stop, or script is running");
-    return;
-  }
-  int switchIndex = findSwitchIndex(deviceName);
-  if (switchIndex >= 0) {
-    digitalWrite(switchOutputs[switchIndex].outputPin, state ? HIGH : LOW);
-    switchOutputs[switchIndex].state = state ? HIGH : LOW;
-    if (currentMode == MODE_MAIN) drawDeviceRow(switchIndex);
-    if (currentMode == MODE_SCRIPT) updateLiveValueRow(switchIndex);
+/**
+ * @brief Process serial command input
+ */
+void processSerialCommands() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (serialBuffer.length() > 0) {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, serialBuffer);
 
-    Serial.print(switchOutputs[switchIndex].name);
-    Serial.print(" turned ");
-    Serial.println(state ? "ON" : "OFF");
-  } else {
-    Serial.print("Unknown device: ");
-    Serial.println(deviceName);
-    Serial.println("Available devices: gse1, gse2, ter, te1, te2, te3");
-  }
-}
-
-int findSwitchIndex(String deviceName) {
-  if (deviceName == "gse1") deviceName = "gse-1";
-  else if (deviceName == "gse2") deviceName = "gse-2";
-  else if (deviceName == "ter") deviceName = "te-r";
-  else if (deviceName == "te1") deviceName = "te-1";
-  else if (deviceName == "te2") deviceName = "te-2";
-  else if (deviceName == "te3") deviceName = "te-3";
-
-  for (int i=0; i<numSwitches; i++) {
-    String swName = String(switchOutputs[i].name);
-    swName.toLowerCase();
-    if (swName == deviceName) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-void printCurrentStatus() {
-  if (csvOutput) {
-    if (!csvHeaderWritten) {
-      Serial.print("Time,");
-      for (int i=0; i<numSwitches; i++) {
-        Serial.print(switchOutputs[i].name);
-        Serial.print("_State,");
-        Serial.print(switchOutputs[i].name);
-        Serial.print("_Voltage,");
-        Serial.print(switchOutputs[i].name);
-        Serial.print("_Current,");
-        Serial.print(switchOutputs[i].name);
-        Serial.print("_Power");
-        if (i < numSwitches-1) Serial.print(",");
+        if (!error) {
+          processNetworkCommand(serialBuffer, &Serial);
+        } else {
+          handleCommand(serialBuffer);
+        }
+        serialBuffer = "";
       }
-      Serial.println();
-      csvHeaderWritten = true;
+    } else {
+      serialBuffer += c;
     }
-    Serial.print(millis());
-    Serial.print(",");
-    for (int i=0; i<numSwitches; i++) {
-      int inaIdx = getInaIndexForSwitch(i);
-      Serial.print(switchOutputs[i].state ? "1":"0");
-      Serial.print(",");
-      Serial.print(inaIdx>=0?deviceVoltage[inaIdx]:0,4);
-      Serial.print(",");
-      Serial.print(inaIdx>=0?deviceCurrent[inaIdx]:0,4);
-      Serial.print(",");
-      Serial.print(inaIdx>=0?devicePower[inaIdx]:0,4);
-      if (i < numSwitches-1) Serial.print(",");
-    }
-    Serial.println();
-  } else {
-    Serial.println("=== Current Status ===");
-    Serial.print("System Lock: ");
-    Serial.println(lock ? "LOCKED":"UNLOCKED");
-    Serial.print("Safety Stop: ");
-    Serial.println(safetyStop ? "ACTIVE":"INACTIVE");
-    Serial.print("Recording: ");
-    Serial.println(recording ? "ACTIVE":"INACTIVE");
-    Serial.print("Script Running: ");
-    Serial.println(isScriptRunning ? "YES":"NO");
-    Serial.print("Output Format: ");
-    Serial.println(csvOutput ? "CSV":"Human Readable");
-    Serial.print("Dark Mode: ");
-    Serial.println(darkMode ? "ON":"OFF");
-    Serial.print("External SD: ");
-    Serial.println(sdAvailable ? "Available":"Not Available");
-    Serial.print("Internal SD: ");
-    Serial.println(internalSdAvailable ? "Available":"Not Available");
-    Serial.print("SD Check Interval: ");
-    Serial.print(SD_CHECK_INTERVAL);
-    Serial.println("ms");
-    Serial.print("Ethernet Connected: ");
-    Serial.println(ethernetConnected ? "YES":"NO");
-    if (ethernetConnected) {
-      Serial.print("IP Address: ");
-      Serial.println(ipToString(Ethernet.localIP()));
-      Serial.print("TCP Port: ");
-      Serial.println(networkConfig.tcpPort);
-      Serial.print("UDP Port: ");
-      Serial.println(networkConfig.udpPort);
-    }
-    Serial.println();
-
-    for (int i=0; i<numSwitches; i++) {
-      int inaIdx = getInaIndexForSwitch(i);
-      Serial.print(switchOutputs[i].name);
-      Serial.print(": ");
-      Serial.print(switchOutputs[i].state ? "ON":"OFF");
-      if (inaIdx >= 0) {
-        Serial.print(" | V=");
-        Serial.print(deviceVoltage[inaIdx], 2);
-        Serial.print("V | I=");
-        Serial.print(deviceCurrent[inaIdx], 1);
-        Serial.print("mA | P=");
-        Serial.print(devicePower[inaIdx], 3);
-        Serial.print("W");
-      }
-      Serial.println();
-    }
-    Serial.println("===================");
   }
 }
 
-void printHelp() {
-  Serial.println("=== Available Commands ===");
-  Serial.println("Output Control:");
-  Serial.println("  gse1 on/off  - Control GSE-1 output");
-  Serial.println("  gse2 on/off  - Control GSE-2 output");
-  Serial.println("  ter on/off   - Control TE-R output");
-  Serial.println("  te1 on/off   - Control TE-1 output");
-  Serial.println("  te2 on/off   - Control TE-2 output");
-  Serial.println("  te3 on/off   - Control TE-3 output");
-  Serial.println();
-  Serial.println("System Control:");
-  Serial.println("  lock         - Lock all outputs");
-  Serial.println("  unlock       - Unlock outputs");
-  Serial.println("  start log    - Start data logging");
-  Serial.println("  stop log     - Stop data logging");
-  Serial.println("  refresh sd   - Manually refresh SD card status");
-  Serial.println();
-  Serial.println("Output Format:");
-  Serial.println("  csv on       - Enable CSV output format");
-  Serial.println("  csv off      - Enable human readable format");
-  Serial.println();
-  Serial.println("Information:");
-  Serial.println("  status       - Show current system status");
-  Serial.println("  help         - Show this help message");
-  Serial.println();
-  Serial.println("Network Commands (JSON format):");
-  Serial.println("  {\"cmd\":\"get_status\"}");
-  Serial.println("  {\"cmd\":\"start_stream\",\"interval\":100}");
-  Serial.println("  {\"cmd\":\"set_output\",\"device\":\"GSE-1\",\"state\":true}");
-  Serial.println("========================");
-}
-
+/**
+ * @brief Print message to serial if available
+ * @param message Message to print
+ */
 void serialPrint(String message) {
   if (serialAvailable && message.trim().length() > 0) {
     String temp = message;
@@ -4363,12 +5081,54 @@ void serialPrint(String message) {
   }
 }
 
-// ==================== Time Helpers ====================
+// ==================== Time Functions ====================
+
+/**
+ * @brief Initialize real-time clock
+ */
+void initRTC() {
+  setSyncProvider(getTeensyTime);
+
+  if (timeStatus() != timeSet) {
+    Serial.println("Unable to sync with the RTC");
+    setTime(0, 0, 0, 1, 1, 2025);
+  } else {
+    Serial.println("RTC has set the system time");
+  }
+}
+
+/**
+ * @brief Get time from Teensy RTC
+ * @return Current time as time_t
+ */
+time_t getTeensyTime() {
+  return Teensy3Clock.get();
+}
+
+/**
+ * @brief Set date and time
+ * @param tm Time elements structure
+ */
+void setDateTime(tmElements_t tm) {
+  time_t t = makeTime(tm);
+  setTime(t);
+  Teensy3Clock.set(t);
+}
+
+/**
+ * @brief Get current time as formatted string
+ * @return Time string
+ */
 String getCurrentTimeString() {
   time_t t = now();
   return formatTimeHHMMSS(t);
 }
 
+/**
+ * @brief Format time as HH:MM:SS string
+ * @param t Time value
+ * @return Formatted time string
+ */
 String formatTimeHHMMSS(time_t t) {
   char buf[12];
   if (use24HourFormat) {
@@ -4383,12 +5143,22 @@ String formatTimeHHMMSS(time_t t) {
   return String(buf);
 }
 
+/**
+ * @brief Format date as YYYY-MM-DD string
+ * @param t Time value
+ * @return Formatted date string
+ */
 String formatDateString(time_t t) {
   char buf[12];
   sprintf(buf, "20%02d-%02d-%02d", year(t) % 100, month(t), day(t));
   return String(buf);
 }
 
+/**
+ * @brief Format short date/time string
+ * @param t Time value
+ * @return Formatted short date/time string
+ */
 String formatShortDateTime(time_t t) {
   char buf[16];
   if (use24HourFormat) {
@@ -4401,4 +5171,328 @@ String formatShortDateTime(time_t t) {
     sprintf(buf, "%02d/%02d %d:%02d%s", month(t), day(t), h, minute(t), isPM ? "P" : "A");
   }
   return String(buf);
+}
+
+// ==================== System Setup ====================
+
+/**
+ * @brief Main system setup function
+ */
+void setup() {
+  Serial.begin(2000000);
+  Wire.begin();
+
+  // Initialize display first for status messages
+  tft.init(320, 480, 0, 0, ST7796S_BGR);
+  tft.setRotation(1);
+  ts.begin();
+  ts.setRotation(1);
+
+  // Initialize EEPROM and settings
+  initializeEEPROM();
+  applyDarkMode();
+
+  // Show initialization screen
+  drawInitializationScreen();
+
+  // Initialize RTC
+  initRTC();
+
+  // Initialize INA226 sensors
+  for (int i = 0; i < numIna; i++) {
+    inaDevices[i]->begin();
+    inaDevices[i]->setMaxCurrentShunt(8, 0.01);
+  }
+
+  // Initialize switch inputs and outputs
+  for (int i = 0; i < numSwitches; i++) {
+    if (switchOutputs[i].switchPin == -1) {
+      continue;
+    }
+    pinMode(switchOutputs[i].switchPin, INPUT_PULLUP);
+    pinMode(switchOutputs[i].outputPin, OUTPUT);
+    switchOutputs[i].debouncer.attach(switchOutputs[i].switchPin);
+    switchOutputs[i].debouncer.interval(10);
+  }
+
+  // Set initial output states based on switch positions
+  for (int i = 0; i < numSwitches; i++) {
+    if (switchOutputs[i].switchPin == -1) {
+      continue;
+    }
+    int initialState = digitalRead(switchOutputs[i].switchPin);
+    if (initialState == LOW) {
+      digitalWrite(switchOutputs[i].outputPin, HIGH);
+      switchOutputs[i].state = HIGH;
+    } else {
+      digitalWrite(switchOutputs[i].outputPin, LOW);
+      switchOutputs[i].state = LOW;
+    }
+  }
+
+  // Initialize LED outputs
+  pinMode(FAN_PWM_PIN, OUTPUT);
+  pinMode(pwrLed, OUTPUT);
+  pinMode(lockLed, OUTPUT);
+  pinMode(stopLed, OUTPUT);
+
+  digitalWrite(pwrLed, HIGH);
+  digitalWrite(lockLed, LOW);
+  digitalWrite(stopLed, LOW);
+
+  // Check SD card availability
+  smartCheckSDCard();
+  checkInternalSD();
+
+  // Apply saved settings
+  applyFanSettings();
+  applyUpdateRate();
+
+  // Initialize script system
+  createNewScript();
+  loadAllScriptNames();
+  sortScripts();
+
+  // Initialize network (non-blocking)
+  initNetworkBackground();
+
+  // Wait for network initialization to complete
+  while (networkInitState == NET_CHECKING_LINK || networkInitState == NET_INITIALIZING || networkInitState == NET_DHCP_WAIT) {
+    updateNetworkInit();
+    updateInitializationScreen();
+    delay(50);
+  }
+
+  // Show final initialization status
+  updateInitializationScreen();
+  if (networkInitState == NET_INITIALIZED) {
+    delay(1000);
+  } else {
+    delay(500);
+  }
+
+  // Switch to main screen
+  drawMainScreen();
+
+  // Send startup message if serial is available
+  if (Serial.available()) {
+    serialAvailable = true;
+    Serial.println("Teensy 4.1 Power Controller Ready - Network Enabled");
+    Serial.println("Type 'help' for available commands");
+    if (networkInitialized) {
+      Serial.print("Network ready. IP: ");
+      Serial.println(ipToString(Ethernet.localIP()));
+    } else {
+      Serial.println("Network initialization failed or disabled");
+    }
+  }
+}
+
+// ==================== Main Loop ====================
+
+/**
+ * @brief Main system loop
+ */
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // Update network initialization state
+  updateNetworkInit();
+
+  // Process serial commands
+  processSerialCommands();
+
+  // Handle network communication
+  handleNetworkCommunication();
+
+  // Check network status periodically
+  checkNetworkStatus();
+
+  // Handle data streaming
+  if (streamingActive && (currentMillis - lastStreamTime >= streamConfig.streamInterval)) {
+    sendLiveDataStream();
+    lastStreamTime = currentMillis;
+  }
+
+  // Check SD card status (only when not recording)
+  if (!recording && (currentMillis - lastSDCheck > SD_CHECK_INTERVAL)) {
+    smartCheckSDCard();
+    checkInternalSD();
+    lastSDCheck = currentMillis;
+  }
+
+  // Handle hardware keypad input
+  char key = keypad.getKey();
+  if (key == 'B') {
+    if (currentMode != MODE_KEYPAD && currentMode != MODE_EDIT_SAVE && currentMode != MODE_EDIT_NAME && currentMode != MODE_NETWORK_EDIT) {
+      handleUniversalBackButton();
+    } else {
+      handleKeypadInput(key);
+    }
+  }
+
+  // Handle script selection shortcuts
+  if (currentMode == MODE_SCRIPT_LOAD && key >= '1' && key <= '9') {
+    int scriptNum = key - '0';
+    if (scriptNum <= numScripts) {
+      selectedScript = scriptNum - 1;
+      highlightedScript = scriptNum - 1;
+      scriptListOffset = max(0, (scriptNum - 1) - 5);
+      drawScriptLoadPage();
+      return;
+    }
+  }
+
+  // Handle script load confirmation
+  if (currentMode == MODE_SCRIPT_LOAD && key == 'A' && selectedScript >= 0) {
+    loadScriptFromFile(scriptList[selectedScript].filename);
+    currentMode = previousMode;
+    selectedScript = -1;
+    highlightedScript = -1;
+    if (previousMode == MODE_SCRIPT) {
+      drawScriptPage();
+    } else {
+      drawEditPage();
+    }
+    return;
+  }
+
+  // Handle recording LED blinking
+  if (recording && (currentMillis - lastPowerLedBlink >= 500)) {
+    lastPowerLedBlink = currentMillis;
+    powerLedState = !powerLedState;
+    digitalWrite(pwrLed, powerLedState ? HIGH : LOW);
+  } else if (!recording) {
+    digitalWrite(pwrLed, HIGH);
+  }
+
+  // Handle keypad input for text modes
+  if (currentMode == MODE_KEYPAD || currentMode == MODE_EDIT_SAVE || currentMode == MODE_EDIT_NAME || currentMode == MODE_NETWORK_EDIT) {
+    if (key && key != 'B') {
+      handleKeypadInput(key);
+    }
+  }
+
+  // Update sensor data
+  if (currentMillis - lastSensorUpdate >= SENSOR_UPDATE_INTERVAL) {
+    updateSensorData();
+    lastSensorUpdate = currentMillis;
+  }
+
+  // Update display elements
+  if (currentMillis - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
+    updateDisplayElements();
+    lastDisplayUpdate = currentMillis;
+  }
+
+  // Write log data
+  if (recording && (currentMillis - lastLogWrite >= LOG_WRITE_INTERVAL)) {
+    recordDataDirect();
+    lastLogWrite = currentMillis;
+  }
+
+  // Handle script execution
+  if (isScriptRunning && !isScriptPaused) {
+    handleScripts();
+
+    // Blink lock LED during script execution
+    if (currentMillis - lastLockBlink >= 750) {
+      lastLockBlink = currentMillis;
+      lockLedState = !lockLedState;
+      digitalWrite(lockLed, lockLedState ? HIGH : LOW);
+    }
+  }
+  else {
+    digitalWrite(lockLed, lock ? HIGH : LOW);
+  }
+
+  // Update clock display
+  if (currentMillis - lastClockRefresh >= 1000) {
+    lastClockRefresh = currentMillis;
+    refreshHeaderClock();
+  }
+
+  // Handle physical switch inputs
+  for (int i = 0; i < numSwitches; i++) {
+    switchOutputs[i].debouncer.update();
+    if (!lock && !safetyStop && !isScriptRunning) {
+      if (switchOutputs[i].debouncer.fell()) {
+        digitalWrite(switchOutputs[i].outputPin, HIGH);
+        switchOutputs[i].state = HIGH;
+        if (currentMode == MODE_MAIN) drawDeviceRow(i);
+        if (currentMode == MODE_SCRIPT) updateLiveValueRow(i);
+      }
+      else if (switchOutputs[i].debouncer.rose()) {
+        digitalWrite(switchOutputs[i].outputPin, LOW);
+        switchOutputs[i].state = LOW;
+        if (currentMode == MODE_MAIN) drawDeviceRow(i);
+        if (currentMode == MODE_SCRIPT) updateLiveValueRow(i);
+      }
+    }
+  }
+
+  // Handle touch screen input
+  if (ts.touched()) {
+    if (currentMillis - lastTouchTime > touchDebounceMs) {
+      TS_Point p = ts.getPoint();
+      int16_t x = map(p.x, 200, 3800, 0, SCREEN_WIDTH);
+      x = SCREEN_WIDTH - x;
+      int16_t y = map(p.y, 200, 3800, SCREEN_HEIGHT, 0);
+
+      // Route touch handling based on current mode
+      switch(currentMode) {
+        case MODE_MAIN:
+          handleTouchMain(x, y);
+          break;
+        case MODE_SETTINGS:
+          handleTouchSettings(x, y);
+          break;
+        case MODE_NETWORK:
+          handleTouchNetwork(x, y);
+          break;
+        case MODE_NETWORK_EDIT:
+          handleTouchNetworkEdit(x, y);
+          break;
+        case MODE_SCRIPT:
+          handleTouchScript(x, y);
+          break;
+        case MODE_SCRIPT_LOAD:
+          handleTouchScriptLoad(x, y);
+          break;
+        case MODE_EDIT:
+          handleTouchEdit(x, y);
+          break;
+        case MODE_EDIT_LOAD:
+          handleTouchScriptLoad(x, y);
+          break;
+        case MODE_EDIT_FIELD:
+          handleTouchEditField(x, y);
+          break;
+        case MODE_DATE_TIME:
+          handleTouchDateTime(x, y);
+          break;
+        case MODE_EDIT_SAVE:
+          handleTouchEditSave(x,y);
+          break;
+        case MODE_EDIT_NAME:
+          handleTouchEditName(x, y);
+          break;
+        case MODE_KEYPAD:
+          handleTouchKeypad(x,y);
+          break;
+        case MODE_DELETE_CONFIRM:
+          handleTouchDeleteConfirm(x, y);
+          break;
+        case MODE_ABOUT:
+          handleTouchAbout(x, y);
+          break;
+        default:
+          break;
+      }
+      lastTouchTime = currentMillis;
+    }
+  }
+
+  // Update safety stop LED
+  digitalWrite(stopLed, safetyStop ? HIGH : LOW);
 }
