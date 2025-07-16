@@ -6,7 +6,9 @@
 #ifndef COMMON_INCLUDES_H
 #define COMMON_INCLUDES_H
 
-// Include types.h first to establish our types
+#include "config.h"
+
+// Then include types.h which depends on config.h
 #include "types.h"
 
 // Then Arduino core

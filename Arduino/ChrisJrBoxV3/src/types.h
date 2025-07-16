@@ -6,21 +6,75 @@
 #ifndef TYPES_H
 #define TYPES_H
 
-#include <Arduino.h>
-#include <Bounce2.h>
-#include <TimeLib.h>
+#include "config.h"
 
-// Forward declarations
-struct ButtonRegion;
+// Core Arduino types and constants must come first.
+#include <Arduino.h>
+#include <TimeLib.h> // For time_t
+#include <Bounce2.h>
+
+// Graph-related enums and structures
+enum GraphDataType {
+  GRAPH_CURRENT = 0,
+  GRAPH_VOLTAGE = 1,
+  GRAPH_POWER = 2
+};
+
+enum GraphTab {
+  GRAPH_TAB_ALL = 0,
+  GRAPH_TAB_GSE1 = 1,
+  GRAPH_TAB_GSE2 = 2,
+  GRAPH_TAB_TER = 3,
+  GRAPH_TAB_TE1 = 4,
+  GRAPH_TAB_TE2 = 5,
+  GRAPH_TAB_TE3 = 6
+};
+
+#define GRAPH_COLORS_COUNT 8
+
+struct DeviceGraphSettings {
+  bool enabled;
+  GraphDataType dataType;
+  uint16_t lineColor;
+  float axisRanges[3][2];  // Min/max for each data type
+  bool autoScale;
+};
+
+struct AllGraphSettings {
+  GraphDataType dataType;
+  bool deviceEnabled[6];
+  float axisRanges[3][2];  // Min/max for each data type
+  bool autoScale;
+  int lineThickness;
+};
+
+struct GraphSettings {
+  DeviceGraphSettings devices[6];
+  AllGraphSettings all;
+  bool isPaused;
+  bool autoScroll;
+  bool showAxesLabels;
+  float timeRange;
+  float panOffsetX;
+  float panOffsetY;
+  bool enablePanning;
+  bool autoFitEnabled = true;
+  int effectiveMaxPoints = GRAPH_MAX_POINTS;
+  unsigned long graphRefreshRate = GRAPH_UPDATE_INTERVAL;
+  bool enableAntialiasing = false;
+  bool showGrids = true;
+  float pausedMinTime = 0.0f;
+  float pausedMaxTime = 0.0f;
+};
 
 // Network structures
 struct NetworkConfig {
   bool enableEthernet = true;
   bool useDHCP = true;
-  uint32_t staticIP = 0xC0A80164;    // 192.168.1.100
-  uint32_t subnet = 0xFFFFFF00;      // 255.255.255.0
-  uint32_t gateway = 0xC0A80101;     // 192.168.1.1
-  uint32_t dns = 0x08080808;         // 8.8.8.8
+  uint32_t staticIP = 0xC0A80164;
+  uint32_t subnet = 0xFFFFFF00;
+  uint32_t gateway = 0xC0A80101;
+  uint32_t dns = 0x08080808;
   uint16_t tcpPort = 8080;
   uint16_t udpPort = 8081;
   uint32_t udpTargetIP = 0xFFFFFFFF;
@@ -41,14 +95,16 @@ struct StreamConfig {
 enum GUIMode {
   MODE_MAIN, MODE_SETTINGS, MODE_NETWORK, MODE_NETWORK_EDIT, MODE_KEYPAD,
   MODE_SCRIPT, MODE_SCRIPT_LOAD, MODE_EDIT, MODE_EDIT_LOAD, MODE_EDIT_SAVE,
-  MODE_EDIT_FIELD, MODE_DATE_TIME, MODE_EDIT_NAME, MODE_DELETE_CONFIRM, MODE_ABOUT
+  MODE_EDIT_FIELD, MODE_DATE_TIME, MODE_EDIT_NAME, MODE_DELETE_CONFIRM, MODE_ABOUT,
+  MODE_GRAPH, MODE_GRAPH_SETTINGS, MODE_GRAPH_DISPLAY  // ADDED
 };
 
 enum KeypadMode {
   KEYPAD_NONE, KEYPAD_UPDATE_RATE, KEYPAD_FAN_SPEED, KEYPAD_SCRIPT_TSTART,
   KEYPAD_SCRIPT_TEND, KEYPAD_DEVICE_ON_TIME, KEYPAD_DEVICE_OFF_TIME,
   KEYPAD_SCRIPT_SEARCH, KEYPAD_SCRIPT_NAME, KEYPAD_NETWORK_IP,
-  KEYPAD_NETWORK_PORT, KEYPAD_NETWORK_TIMEOUT
+  KEYPAD_NETWORK_PORT, KEYPAD_NETWORK_TIMEOUT, KEYPAD_GRAPH_MIN_Y, KEYPAD_GRAPH_MAX_Y,
+  KEYPAD_GRAPH_TIME_RANGE, KEYPAD_GRAPH_MAX_POINTS, KEYPAD_GRAPH_REFRESH_RATE  // ADDED
 };
 
 struct ButtonRegion {
@@ -64,7 +120,7 @@ struct SwitchOutput {
   const char* name;
   int outputPin;
   int switchPin;
-  Bounce debouncer;
+  Bounce debouncer;  // FIXED: Now has complete class definition
   bool state;
 };
 
@@ -96,7 +152,7 @@ struct ScriptMetadata {
 struct DeviceTimingField {
   int x, y, w, h;
   int deviceIndex;
-  int fieldType; // 0=ON time, 1=OFF time, 2=checkbox
+  int fieldType;
   bool isSelected;
 };
 
@@ -109,7 +165,7 @@ struct EditField {
 struct NetworkEditField {
   int x, y, w, h;
   char value[32];
-  int fieldType; // 0=IP, 1=Port, 2=Timeout
+  int fieldType;
   bool isSelected;
 };
 
@@ -130,11 +186,8 @@ struct SystemState {
   bool csvHeaderWritten = false;
   bool firstDataPoint = true;
   bool currentSDContext = false;
-
   int fanSpeed = 255;
   unsigned long updateRate = 100;
-
-  // Timing
   unsigned long lastSensorUpdate = 0;
   unsigned long lastDisplayUpdate = 0;
   unsigned long lastLogWrite = 0;
@@ -143,7 +196,7 @@ struct SystemState {
   unsigned long lastClockRefresh = 0;
   unsigned long lastPowerLedBlink = 0;
   unsigned long recordStartMillis = 0;
-
+  unsigned long lastGraphUpdate = 0;
   char recordFilename[64] = "power_data.json";
 };
 
@@ -151,23 +204,19 @@ struct GUIState {
   GUIMode currentMode = MODE_MAIN;
   GUIMode previousMode = MODE_MAIN;
   KeypadMode keypadMode = KEYPAD_NONE;
-
-  // Edit fields
+  GraphTab currentGraphTab = GRAPH_TAB_ALL;
+  bool isInGraphSettings = false;
   int numDeviceFields = 0;
   int selectedDeviceField = -1;
   int numEditFields = 0;
   int selectedField = -1;
   int numNetworkFields = 0;
   int selectedNetworkField = -1;
-
-  // Script list
   int scriptListOffset = 0;
   int selectedScript = -1;
   int highlightedScript = -1;
   bool showDeleteConfirm = false;
   char deleteScriptName[32] = "";
-
-  // Text input
   char keypadBuffer[32] = "";
   int keypadPos = 0;
   bool isEditingName = false;

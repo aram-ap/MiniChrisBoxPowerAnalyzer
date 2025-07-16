@@ -21,6 +21,7 @@
 #include "serial_commands.h"
 #include "time_utils.h"
 #include "utils.h"
+#include "graphs.h"  // Add graph module
 
 // Global state variables
 SystemState systemState;
@@ -33,7 +34,7 @@ void setup() {
   // Initialize display first for status messages
   initDisplay();
 
-  // Initialize touch screen - THIS WAS MISSING!
+  // Initialize touch screen
   initTouch();
 
   // Initialize EEPROM and settings
@@ -48,6 +49,7 @@ void setup() {
   initSwitches();
   initDataLogging();
   initScript();
+  initGraphs();  // Add graph initialization
   initNetwork();
 
   // Wait for network initialization
@@ -92,6 +94,9 @@ void loop() {
 
   // Update sensors
   updateSensors(currentMillis);
+
+  // Update graphs
+  updateGraphData(currentMillis);  // Add graph data updates
 
   // Update display
   updateDisplay(currentMillis);

@@ -8,22 +8,26 @@
 
 #include <Arduino.h>
 
-// System information - use macro instead of const char*
-#define SOFTWARE_VERSION "Mini Chris Box V5.1 - Network Enabled"
+// System information - use #define to avoid multiple definitions
+#define SOFTWARE_VERSION "Mini Chris Box V5.2 - Network and Graphs"
 
 // EEPROM configuration
 #define EEPROM_MAGIC_NUMBER 0xDEADBEEF
 #define EEPROM_MAGIC_ADDR 0
 #define EEPROM_VERSION_ADDR 4
-#define EEPROM_VERSION_NUMBER 2
+#define EEPROM_VERSION_NUMBER 3  // Incremented for graph settings
 
 // Performance timing
 #define SENSOR_UPDATE_INTERVAL 50
-#define DISPLAY_UPDATE_INTERVAL 200
+#define DISPLAY_UPDATE_INTERVAL 170
 #define LOG_WRITE_INTERVAL 50
 #define NETWORK_CHECK_INTERVAL 5000
 #define HEARTBEAT_INTERVAL 10000
 #define SD_CHECK_INTERVAL 2000
+#define GRAPH_UPDATE_INTERVAL 100
+
+// Graph configuration - ADDED
+#define GRAPH_MAX_POINTS 900
 
 // Hardware pins
 const int PWR_LED_PIN = 22;
@@ -46,6 +50,11 @@ const int FAN_PWM_PIN = 33;
 // Screen dimensions
 const int SCREEN_WIDTH = 480;
 const int SCREEN_HEIGHT = 320;
+
+// Main screen layout (modified for graph button)
+#define MAIN_DATA_WIDTH 365
+#define MAIN_BUTTON_COLUMN_X 375
+#define MAIN_BUTTON_COLUMN_WIDTH 100
 
 // Color definitions
 #define COLOR_BLACK     0x0000
@@ -74,18 +83,13 @@ const int SCREEN_HEIGHT = 320;
 #define MAX_EDIT_FIELDS 10
 #define MAX_NETWORK_FIELDS 10
 
-// Keypad configuration
-const byte ROW_PINS[4] = {28, 27, 26, 25};
-const byte COL_PINS[4] = {32, 31, 30, 29};
-const char KEYPAD_KEYS[4][4] = {
-  {'1', '2', '3', 'A'},
-  {'4', '5', '6', 'B'},
-  {'7', '8', '9', 'C'},
-  {'*', '0', '#', 'D'}
-};
+// Keypad configuration - FIXED: Changed to extern declarations
+extern byte ROW_PINS[4];
+extern byte COL_PINS[4];
+extern const char KEYPAD_KEYS[4][4];
 
-// T9 character mapping - declare as extern here
-extern const char* T9_LETTERS[];
+// T9 character mapping
+extern const char* T9_LETTERS[];  // Declare as extern to avoid redefinition
 
 // EEPROM memory map
 #define EEPROM_FAN_ON_ADDR     8
@@ -95,5 +99,6 @@ extern const char* T9_LETTERS[];
 #define EEPROM_DARK_MODE_ADDR  24
 #define EEPROM_NETWORK_CONFIG_ADDR 28
 #define EEPROM_SORT_MODE_ADDR  60
+#define EEPROM_GRAPH_SETTINGS_ADDR 64  // New address for graph settings
 
 #endif // CONFIG_H

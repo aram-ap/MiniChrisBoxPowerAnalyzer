@@ -1,5 +1,5 @@
 /**
-* @file display.h
+ * @file display.h
  * @brief Display and GUI functions
  */
 
@@ -11,10 +11,16 @@
 #include <Adafruit_ST7796S.h>
 #include "types.h"
 
+// Forward declarations
+void drawDeviceGraph(int deviceIndex, GraphDataType dataType, uint16_t color,
+                    float minY, float maxY, int thickness);
+void drawAllGraphSettings();
+void drawDeviceGraphSettings(int deviceIndex);
+
 // Display initialization
 void initDisplay();
 void updateDisplay(unsigned long currentMillis);
-void updateDisplayElements();  // Remove static declaration
+void updateDisplayElements();
 
 // Screen drawing functions
 void drawInitializationScreen();
@@ -45,7 +51,7 @@ void updateLockButton();
 extern Adafruit_ST7796S tft;
 extern GUIState guiState;
 
-// Button definitions
+// Main screen buttons
 extern ButtonRegion btnRecord;
 extern ButtonRegion btnSDRefresh;
 extern ButtonRegion btnStop;
@@ -55,6 +61,23 @@ extern ButtonRegion btnAllOff;
 extern ButtonRegion btnScript;
 extern ButtonRegion btnEdit;
 extern ButtonRegion btnSettings;
+extern ButtonRegion btnGraph;
+
+// Graph buttons
+extern ButtonRegion btnGraphBack;
+extern ButtonRegion btnGraphStop;
+extern ButtonRegion btnGraphClear;
+extern ButtonRegion btnGraphPause;
+extern ButtonRegion btnGraphSettings;
+extern ButtonRegion btnGraphSettingsBack;
+extern ButtonRegion btnGraphDataType;
+extern ButtonRegion btnGraphMinY;
+extern ButtonRegion btnGraphMaxY;
+extern ButtonRegion btnGraphThickness;
+extern ButtonRegion btnGraphTimeRange;
+extern ButtonRegion btnGraphDisplay;
+extern ButtonRegion btnGraphDisplayBack;
+extern ButtonRegion btnGraphDataTypeFooter;
 
 // Settings panel buttons
 extern ButtonRegion btnSettingsBack;

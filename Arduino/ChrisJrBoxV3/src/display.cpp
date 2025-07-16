@@ -12,10 +12,12 @@
 #include "settings.h"
 #include "network.h"
 #include "datalog.h"
+#include "graphs.h"
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeMonoBold9pt7b.h>
-using namespace qindesign::network;  // Add this line
+
+using namespace qindesign::network;
 
 // Display object
 Adafruit_ST7796S tft = Adafruit_ST7796S(TFT_CS, TFT_DC, TFT_RST);
@@ -32,7 +34,7 @@ static DeviceTimingField deviceFields[MAX_DEVICE_FIELDS];
 static EditField editFields[MAX_EDIT_FIELDS];
 static NetworkEditField networkFields[MAX_NETWORK_FIELDS];
 
-// Button definitions - Main screen
+// Button definitions - Main screen (modified layout)
 ButtonRegion btnRecord     = {  5,  5,   120, 35, "RECORD",    false, COLOR_RECORD,    false };
 ButtonRegion btnSDRefresh  = {130,  5,    40, 35, "SD",        false, COLOR_CYAN,      true };
 ButtonRegion btnStop       = { SCREEN_WIDTH - 110, 5, 105, 35, "STOP", false, COLOR_YELLOW, true };
@@ -41,7 +43,54 @@ ButtonRegion btnAllOn      = {  5,  SCREEN_HEIGHT - 40, 80, 35, "ALL ON", false,
 ButtonRegion btnAllOff     = { 90,  SCREEN_HEIGHT - 40, 80, 35, "ALL OFF",false, COLOR_YELLOW, true };
 ButtonRegion btnScript     = {175,  SCREEN_HEIGHT - 40, 60, 35, "Script", false, COLOR_YELLOW, true };
 ButtonRegion btnEdit       = {240,  SCREEN_HEIGHT - 40, 60, 35, "Edit",   false, COLOR_YELLOW, true };
-ButtonRegion btnSettings   = {305,  SCREEN_HEIGHT - 40, 80, 35, "Settings",false, COLOR_YELLOW, true };
+ButtonRegion btnSettings   = {305,  SCREEN_HEIGHT - 40, 75, 35, "Settings",false, COLOR_YELLOW, true };
+
+// New graph button in the right column
+ButtonRegion btnGraph      = { MAIN_BUTTON_COLUMN_X, 50, MAIN_BUTTON_COLUMN_WIDTH, 35, "Graph", false, COLOR_BLUE, true };
+
+// Graph page buttons
+ButtonRegion btnGraphBack     = {  5,  5,   80, 35, "Back",     false, COLOR_YELLOW, true };
+ButtonRegion btnGraphStop     = { SCREEN_WIDTH - 85, SCREEN_HEIGHT - 40, 80, 35, "STOP", false, COLOR_YELLOW, true };
+ButtonRegion btnGraphClear    = {  5, SCREEN_HEIGHT - 40,  80, 35, "Clear",    false, COLOR_YELLOW, true };
+ButtonRegion btnGraphPause    = { 90, SCREEN_HEIGHT - 40,  80, 35, "Pause",    false, COLOR_YELLOW, true };
+ButtonRegion btnGraphSettings = {175, SCREEN_HEIGHT - 40,  80, 35, "Settings", false, COLOR_YELLOW, true };
+
+// Graph settings buttons
+ButtonRegion btnGraphSettingsBack = {  5,  5,   80, 35, "Back", false, COLOR_YELLOW, true };
+ButtonRegion btnGraphDataType     = {150, 60,  100, 30, "Current", false, COLOR_YELLOW, true };
+ButtonRegion btnGraphMinY = {
+  /*x*/ 0, /*y*/ 0, /*w*/ 80, /*h*/ 30,
+  /*label*/ "0.00",
+  /*pressed*/ false,
+  /*color*/ COLOR_YELLOW,
+  /*enabled*/ true
+};
+ButtonRegion btnGraphMaxY = {
+  0, 0, 80, 30,
+  "0.00",
+  false,
+  COLOR_YELLOW,
+  true
+};
+
+ButtonRegion btnGraphThickness = {
+  0, 0, 60, 30,
+  "1",
+  false,
+  COLOR_YELLOW,
+  true
+};
+
+// ADDED: Missing button definitions
+ButtonRegion btnGraphTimeRange = {0, 0, 80, 30, "60.00", false, COLOR_YELLOW, true};
+// ButtonRegion btnGraphDisplay = {0, 0, 80, 30, "Display", false, COLOR_YELLOW, true};
+// ButtonRegion btnGraphDisplayBack = {5, 5, 80, 35, "Back", false, COLOR_YELLOW, true};
+// ButtonRegion btnGraphDataTypeFooter = {265, SCREEN_HEIGHT - 40, 67, 35, "Current", false, COLOR_RED, true};
+
+extern ButtonRegion btnGraphDisplay;
+extern ButtonRegion btnGraphDisplayBack;
+extern ButtonRegion btnGraphDataTypeFooter;
+
 
 // Settings panel buttons
 ButtonRegion btnSettingsBack = { 5, 5, 80, 35, "Back", false, COLOR_YELLOW, true };
@@ -100,12 +149,11 @@ ButtonRegion btnSortDropdown = {SCREEN_WIDTH - 100, 5, 95, 35, "Name", false, CO
 ButtonRegion btnDeleteYes = {150, 150, 80, 35, "Yes", false, COLOR_RED, true};
 ButtonRegion btnDeleteNo = {250, 150, 80, 35, "No", false, COLOR_YELLOW, true};
 
-// Private helper functions
-void updateDisplayElements();
-
 void initDisplay() {
   tft.init(320, 480, 0, 0, ST7796S_BGR);
   tft.setRotation(1);
+  // ADDED: SPI Optimization for faster refresh
+  tft.setSPISpeed(52000000);
   applyDarkMode();
 }
 
@@ -132,6 +180,7 @@ void drawButton(ButtonRegion& btn, uint16_t bgColor, uint16_t textColor,
   tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
   tft.setTextColor(textColor);
+
   int16_t x1, y1;
   uint16_t w, h;
   tft.getTextBounds(label, btn.x, btn.y, &x1, &y1, &w, &h);
@@ -149,7 +198,7 @@ void drawInitializationScreen() {
   int16_t x1, y1;
   uint16_t w, h;
 
-  String title = "Mini Chris Box V5.1";
+  String title = "Mini Chris Box V5.2";
   tft.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
   tft.setCursor((SCREEN_WIDTH - w) / 2, 80);
   tft.print(title);
@@ -170,6 +219,8 @@ void drawInitializationScreen() {
   tft.print("• Display ready");
   tft.setCursor(50, 200);
   tft.print("• SD cards checked");
+  tft.setCursor(50, 220);
+  tft.print("• Graphs initialized");
 
   updateInitializationScreen();
 }
@@ -192,40 +243,40 @@ void updateInitializationScreen() {
       case NET_INITIALIZING:
       case NET_DHCP_WAIT:
         statusColor = COLOR_YELLOW;
-        break;
+      break;
       case NET_INITIALIZED:
         statusColor = COLOR_GREEN;
-        break;
+      break;
       case NET_FAILED:
         statusColor = COLOR_RED;
-        break;
+      break;
     }
   }
 
-  // Update status text
+  // Update status text in right column
   static String lastStatusText = "";
   if (statusText != lastStatusText) {
-    tft.fillRect(50, 210, 400, 25, COLOR_BLACK);
+    tft.fillRect(250, 160, 200, 100, COLOR_BLACK);  // Right column
     tft.setTextColor(statusColor);
-    tft.setCursor(50, 230);
+    tft.setCursor(250, 180);
     tft.print(statusText);
     lastStatusText = statusText;
   }
 
-  // Show completion message
+  // Show completion message in right column
   if (networkInitState == NET_INITIALIZED || networkInitState == NET_FAILED || !networkConfig.enableEthernet) {
-    tft.fillRect(50, 250, 400, 60, COLOR_BLACK);
-
     tft.setTextColor(COLOR_GREEN);
-    tft.setCursor(50, 270);
-    tft.print("System Ready!");
+    tft.setCursor(250, 210);
+    tft.print("Network Ready!");
 
     if (networkInitState == NET_INITIALIZED) {
       tft.setTextColor(COLOR_CYAN);
-      tft.setCursor(50, 290);
+      tft.setCursor(250, 230);
       tft.print("IP: " + ipToString(Ethernet.localIP()));
-      tft.setCursor(50, 310);
-      tft.print("TCP: " + String(networkConfig.tcpPort) + "  UDP: " + String(networkConfig.udpPort));
+      tft.setCursor(250, 250);
+      tft.print("TCP: " + String(networkConfig.tcpPort));
+      tft.setCursor(250, 270);
+      tft.print("UDP: " + String(networkConfig.udpPort));
     }
   }
 }
@@ -242,7 +293,7 @@ void drawMainScreen() {
   if (!isScriptRunning) {
     String nowStr = getCurrentTimeString();
     tft.getTextBounds(nowStr, 0, 0, &x1, &y1, &w, &h);
-    tft.setCursor((SCREEN_WIDTH - w) / 2, 30);
+    tft.setCursor((SCREEN_WIDTH - w) / 2, 30);  // Center on full screen width
     tft.print(nowStr);
   } else {
     char buff[32];
@@ -252,7 +303,7 @@ void drawMainScreen() {
       snprintf(buff, sizeof(buff), "T+%ld", scriptTimeSeconds);
     }
     tft.getTextBounds(buff, 0, 0, &x1, &y1, &w, &h);
-    tft.setCursor((SCREEN_WIDTH - w) / 2, 30);
+    tft.setCursor((SCREEN_WIDTH - w) / 2, 30);  // Center on full screen width
     tft.print(buff);
   }
 
@@ -283,7 +334,13 @@ void drawMainScreen() {
   updateLockButton();
   drawButton(btnSettings, COLOR_YELLOW, COLOR_BLACK, "Settings", false, btnSettings.enabled);
 
-  // Draw data table header
+  // Draw new graph button in right column
+  drawButton(btnGraph, COLOR_BLUE, COLOR_WHITE, "Graph");
+
+  // Draw vertical separator line
+  tft.drawLine(MAIN_BUTTON_COLUMN_X - 5, 40, MAIN_BUTTON_COLUMN_X - 5, SCREEN_HEIGHT - 45, COLOR_GRAY);
+
+  // Draw data table header (in reduced width area)
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(COLOR_WHITE);
 
@@ -291,12 +348,12 @@ void drawMainScreen() {
   tft.print("Output");
   tft.setCursor(100, 60);
   tft.print("V");
-  tft.setCursor(180, 60);
+  tft.setCursor(175, 60);
   tft.print("I (A)");
-  tft.setCursor(260, 60);
+  tft.setCursor(270, 60);
   tft.print("P (W)");
 
-  tft.drawLine(5, 65, SCREEN_WIDTH - 5, 65, COLOR_GRAY);
+  tft.drawLine(5, 65, MAIN_DATA_WIDTH, 65, COLOR_GRAY);
 
   // Draw device rows
   for (int i = 0; i < numSwitches; i++) {
@@ -305,7 +362,7 @@ void drawMainScreen() {
 
   // Draw total row
   int totalRowY = 85 + numSwitches * 25 + 10;
-  tft.drawLine(5, totalRowY - 5, SCREEN_WIDTH - 5, totalRowY - 5, COLOR_GRAY);
+  tft.drawLine(5, totalRowY - 5, MAIN_DATA_WIDTH, totalRowY - 5, COLOR_GRAY);
   drawTotalRow();
 }
 
@@ -533,36 +590,37 @@ void drawAboutPage() {
 
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(COLOR_WHITE);
+  int xOffset = 20;
 
-  tft.setCursor(30, 70);
+  tft.setCursor(xOffset, 70);
   tft.print(SOFTWARE_VERSION);
 
-  tft.setCursor(30, 95);
+  tft.setCursor(xOffset, 95);
   tft.print("Designed by Aram Aprahamian");
 
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(COLOR_GRAY);
 
-  tft.setCursor(30, 125);
+  tft.setCursor(xOffset, 125);
   tft.print("Copyright (c) 2025 Aram Aprahamian");
 
-  tft.setCursor(30, 145);
+  tft.setCursor(xOffset, 145);
   tft.print("Permission is hereby granted, free of charge, to any ");
-  tft.setCursor(30, 160);
+  tft.setCursor(xOffset, 160);
   tft.print("person obtaining a copy of this software and associated");
-  tft.setCursor(30, 175);
+  tft.setCursor(xOffset, 175);
   tft.print("documentation files (the \"Software\"), to deal in the");
-  tft.setCursor(30, 190);
+  tft.setCursor(xOffset, 190);
   tft.print("Software without restriction, including without limitation");
-  tft.setCursor(30, 205);
+  tft.setCursor(xOffset, 205);
   tft.print("the rights to use, copy, modify, merge, publish,");
-  tft.setCursor(30, 220);
+  tft.setCursor(xOffset, 220);
   tft.print("distribute, sublicense, and/or sell copies of the Software,");
-  tft.setCursor(30, 235);
+  tft.setCursor(xOffset, 235);
   tft.print("and to permit persons to whom the Software is");
-  tft.setCursor(30, 250);
+  tft.setCursor(xOffset, 250);
   tft.print("furnished to do so, subject to the above copyright");
-  tft.setCursor(30, 265);
+  tft.setCursor(xOffset, 265);
   tft.print("notice being included in all copies.");
 }
 
@@ -605,6 +663,21 @@ void drawKeypadPanel() {
     case KEYPAD_NETWORK_TIMEOUT:
       tft.print("Enter Timeout (ms):");
       break;
+    case KEYPAD_GRAPH_MIN_Y:
+      tft.print("Enter Min Y Value:");
+      break;
+    case KEYPAD_GRAPH_MAX_Y:
+      tft.print("Enter Max Y Value:");
+      break;
+    case KEYPAD_GRAPH_TIME_RANGE:
+      tft.print("Enter Time Range (sec):");
+      break;
+    case KEYPAD_GRAPH_MAX_POINTS:
+      tft.print("Enter Max Points:");
+      break;
+    case KEYPAD_GRAPH_REFRESH_RATE:
+      tft.print("Enter Refresh Rate (ms):");
+      break;
     default:
       tft.print("Enter Value:");
       break;
@@ -622,10 +695,13 @@ void drawKeypadPanel() {
   if (guiState.keypadMode == KEYPAD_DEVICE_ON_TIME || guiState.keypadMode == KEYPAD_DEVICE_OFF_TIME ||
       guiState.keypadMode == KEYPAD_SCRIPT_TSTART || guiState.keypadMode == KEYPAD_SCRIPT_TEND ||
       guiState.keypadMode == KEYPAD_UPDATE_RATE || guiState.keypadMode == KEYPAD_FAN_SPEED ||
-      guiState.keypadMode == KEYPAD_NETWORK_PORT || guiState.keypadMode == KEYPAD_NETWORK_TIMEOUT) {
-    tft.print("*=Backspace, #=+/-, A=Enter, B=Back, C=Clear");
+      guiState.keypadMode == KEYPAD_NETWORK_PORT || guiState.keypadMode == KEYPAD_NETWORK_TIMEOUT ||
+      guiState.keypadMode == KEYPAD_GRAPH_MIN_Y || guiState.keypadMode == KEYPAD_GRAPH_MAX_Y ||
+      guiState.keypadMode == KEYPAD_GRAPH_TIME_RANGE || guiState.keypadMode == KEYPAD_GRAPH_MAX_POINTS ||
+      guiState.keypadMode == KEYPAD_GRAPH_REFRESH_RATE) {
+    tft.print("*=Backspace, #=+/-, A=Enter, B=Back, C=Clear, D=Decimal");
   } else if (guiState.keypadMode == KEYPAD_NETWORK_IP) {
-    tft.print("*=Backspace, .=Decimal, A=Enter, B=Back, C=Clear");
+    tft.print("*=Backspace, D=Decimal, A=Enter, B=Back, C=Clear");
   } else {
     tft.print("A=Enter, B=Back, *=Clear");
   }
@@ -649,14 +725,14 @@ void drawScriptPage() {
   tft.setTextColor(COLOR_WHITE);
   char buff[64];
 
-  // Display script name and status
+  // Display script name and status - FIX DUPLICATE HEADER
   if (!isScriptRunning) {
     tft.setFont(&FreeSansBold12pt7b);
     snprintf(buff, sizeof(buff), "%s", currentScript.scriptName);
     int16_t x1, y1;
     uint16_t w, h;
     tft.getTextBounds(buff, 0, 0, &x1, &y1, &w, &h);
-    tft.setCursor((SCREEN_WIDTH - w) / 2, 30);
+    tft.setCursor((SCREEN_WIDTH - w) / 2, 30);  // Only draw once, centered
     tft.print(buff);
   } else {
     tft.setFont(&FreeSans9pt7b);
@@ -672,7 +748,7 @@ void drawScriptPage() {
     int16_t x1, y1;
     uint16_t w, h;
     tft.getTextBounds(buff, 0, 0, &x1, &y1, &w, &h);
-    tft.setCursor((SCREEN_WIDTH - w) / 2, 25);
+    tft.setCursor((SCREEN_WIDTH - w) / 2, 25);  // Only draw once, centered
     tft.print(buff);
   }
 
@@ -1140,10 +1216,11 @@ void drawDeviceRow(int row) {
   int yPos = 85 + row * 25;
   bool isOn = (switchOutputs[row].state == HIGH);
 
-  tft.fillRect(0, yPos - 17, SCREEN_WIDTH, 25, COLOR_BLACK);
+  // Fill background only in the data area
+  tft.fillRect(0, yPos - 17, MAIN_DATA_WIDTH, 25, COLOR_BLACK);
 
   if (isOn) {
-    tft.fillRect(0, yPos - 17, SCREEN_WIDTH, 25, COLOR_PURPLE);
+    tft.fillRect(0, yPos - 17, MAIN_DATA_WIDTH, 25, COLOR_PURPLE);
   }
 
   uint16_t textColor = COLOR_WHITE;
@@ -1159,10 +1236,10 @@ void drawDeviceRow(int row) {
     tft.setCursor(100, yPos);
     tft.printf("%.2fV", deviceVoltage[inaIdx]);
 
-    tft.setCursor(180, yPos);
+    tft.setCursor(175, yPos);
     tft.printf("%.4fA", deviceCurrent[inaIdx] / 1000.0);
 
-    tft.setCursor(260, yPos);
+    tft.setCursor(270, yPos);
     tft.printf("%.3fW", devicePower[inaIdx]);
   }
 }
@@ -1170,7 +1247,8 @@ void drawDeviceRow(int row) {
 void drawTotalRow() {
   int totalRowY = 85 + numSwitches * 25 + 15;
 
-  tft.fillRect(0, totalRowY - 17, SCREEN_WIDTH, 25, COLOR_BLACK);
+  // Fill background only in the data area
+  tft.fillRect(0, totalRowY - 17, MAIN_DATA_WIDTH, 25, COLOR_BLACK);
 
   tft.setFont(&FreeSans9pt7b);
   tft.setTextColor(COLOR_YELLOW);
@@ -1182,10 +1260,10 @@ void drawTotalRow() {
   tft.setCursor(100, totalRowY);
   tft.printf("%.2fV", deviceVoltage[6]);
 
-  tft.setCursor(180, totalRowY);
+  tft.setCursor(175, totalRowY);
   tft.printf("%.4fA", deviceCurrent[6] / 1000.0);
 
-  tft.setCursor(260, totalRowY);
+  tft.setCursor(270, totalRowY);
   tft.printf("%.3fW", devicePower[6]);
 }
 
@@ -1260,7 +1338,7 @@ void refreshHeaderClock() {
   int16_t x1,y1;
   uint16_t w,h;
   tft.getTextBounds(buff, 0, 0, &x1, &y1, &w, &h);
-  int tx = (SCREEN_WIDTH - w) / 2;
+  int tx = (SCREEN_WIDTH - w) / 2;  // Center on full screen width
   int clearX = max(0, tx - 10);
   int clearW = min(SCREEN_WIDTH, w + 20);
   tft.fillRect(clearX, 10, clearW, 25, COLOR_BLACK);
@@ -1277,7 +1355,6 @@ void updateLockButton() {
              btnLock.enabled);
 }
 
-// Private helper function implementation
 void updateDisplayElements() {
   if (guiState.currentMode == MODE_MAIN || guiState.currentMode == MODE_SCRIPT) {
     for (int i = 0; i < numSwitches; i++) {
@@ -1286,6 +1363,10 @@ void updateDisplayElements() {
     if (guiState.currentMode == MODE_MAIN) {
       drawTotalRow();
     }
+  }
+  else if (guiState.currentMode == MODE_GRAPH) {
+    updateGraphAreaSmooth();
+    drawGraphInfo();
   }
 }
 

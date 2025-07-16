@@ -12,6 +12,10 @@
 #include "network.h"
 #include "settings.h"
 #include "time_utils.h"
+#include "graphs.h"
+// extern ButtonRegion btnGraphDisplay;
+// extern ButtonRegion btnGraphDisplayBack;
+// extern ButtonRegion btnGraphDataTypeFooter;
 
 // Touch object
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
@@ -41,54 +45,313 @@ void handleTouch(unsigned long currentMillis) {
       switch(guiState.currentMode) {
         case MODE_MAIN:
           handleTouchMain(x, y);
-          break;
+        break;
         case MODE_SETTINGS:
           handleTouchSettings(x, y);
-          break;
+        break;
         case MODE_NETWORK:
           handleTouchNetwork(x, y);
-          break;
+        break;
         case MODE_NETWORK_EDIT:
           handleTouchNetworkEdit(x, y);
-          break;
+        break;
         case MODE_SCRIPT:
           handleTouchScript(x, y);
-          break;
+        break;
         case MODE_SCRIPT_LOAD:
           handleTouchScriptLoad(x, y);
-          break;
+        break;
         case MODE_EDIT:
           handleTouchEdit(x, y);
-          break;
+        break;
         case MODE_EDIT_LOAD:
           handleTouchScriptLoad(x, y);
-          break;
+        break;
         case MODE_EDIT_FIELD:
           handleTouchEditField(x, y);
-          break;
+        break;
         case MODE_DATE_TIME:
           handleTouchDateTime(x, y);
-          break;
+        break;
         case MODE_EDIT_SAVE:
           handleTouchEditSave(x,y);
-          break;
+        break;
         case MODE_EDIT_NAME:
           handleTouchEditName(x, y);
-          break;
+        break;
         case MODE_KEYPAD:
           handleTouchKeypad(x,y);
-          break;
+        break;
         case MODE_DELETE_CONFIRM:
           handleTouchDeleteConfirm(x, y);
-          break;
+        break;
         case MODE_ABOUT:
           handleTouchAbout(x, y);
-          break;
+        break;
+        case MODE_GRAPH:
+          handleTouchGraph(x, y);
+        break;
+        case MODE_GRAPH_SETTINGS:
+          handleTouchGraphSettings(x, y);
+        case MODE_GRAPH_DISPLAY:
+          handleTouchGraphDisplaySettings(x, y);
+        break;
+
+        break;
         default:
           break;
       }
       systemState.lastTouchTime = currentMillis;
     }
+  }
+}
+
+void handleTouchGraph(int16_t x, int16_t y) {
+  // Handle back button
+  if (touchInButton(x, y, btnGraphBack)) {
+    guiState.currentMode = MODE_MAIN;
+    drawMainScreen();
+    return;
+  }
+
+  // Handle stop button
+  if (touchInButton(x, y, btnGraphStop)) {
+    if (!systemState.safetyStop) {
+      systemState.lockBeforeStop = systemState.lock;
+      systemState.safetyStop = true;
+      setAllOutputsOff();
+      if (isScriptRunning) stopScript(true);
+      if (systemState.recording) stopRecording();
+    } else {
+      systemState.safetyStop = false;
+      bool prevLock = systemState.lock;
+      systemState.lock = systemState.lockBeforeStop;
+      if (!systemState.lock && prevLock) syncOutputsToSwitches();
+    }
+    drawGraphPage();
+    return;
+  }
+
+  // Handle footer buttons
+  if (touchInButton(x, y, btnGraphClear)) {
+    clearGraphData();
+    drawGraphPage();
+    return;
+  }
+
+  if (touchInButton(x, y, btnGraphPause)) {
+    if (graphSettings.isPaused) {
+      resumeGraphData();
+    } else {
+      pauseGraphData();
+    }
+    drawGraphPage();
+    return;
+  }
+
+  if (touchInButton(x, y, btnGraphSettings)) {
+    guiState.currentMode = MODE_GRAPH_SETTINGS;
+    drawGraphSettingsPage();
+    return;
+  }
+
+  if (touchInButton(x, y, btnGraphDataTypeFooter)) {
+    cycleAllGraphDataType();
+    return;
+  }
+
+  // Handle tab touches
+  int tabWidth = 50;
+  int startX = 90;
+
+  for (int i = 0; i < 7; i++) {
+    if (x >= startX + i * tabWidth && x <= startX + (i + 1) * tabWidth - 2 &&
+        y >= 5 && y <= 5 + GRAPH_TAB_HEIGHT) {
+      switchGraphTab((GraphTab)i);
+      return;
+        }
+  }
+}
+
+void handleTouchGraphSettings(int16_t x, int16_t y) {
+  if (touchInButton(x, y, btnGraphSettingsBack)) {
+    guiState.currentMode = MODE_GRAPH;
+    graphState.needsFullRedraw = true;
+    drawGraphPage();
+    return;  // Ensure immediate return
+  }
+
+  // Handle display button
+  if (touchInButton(x, y, btnGraphDisplay)) {
+    guiState.currentMode = MODE_GRAPH_DISPLAY;
+    drawGraphDisplaySettingsPage();
+    return;
+  }
+
+  // Handle settings based on current tab
+  if (guiState.currentGraphTab == GRAPH_TAB_ALL) {
+    // Data type button
+    if (touchInButton(x, y, btnGraphDataType)) {
+      cycleAllGraphDataType();
+      drawGraphSettingsPage();
+      return;
+    }
+
+    // Min/Max buttons
+    if (touchInButton(x, y, btnGraphMinY)) {
+      guiState.keypadMode = KEYPAD_GRAPH_MIN_Y;
+      guiState.currentMode = MODE_KEYPAD;
+      sprintf(guiState.keypadBuffer, "%.2f",
+              graphSettings.all.axisRanges[graphSettings.all.dataType][0]);
+      guiState.keypadPos = strlen(guiState.keypadBuffer);
+      drawKeypadPanel();
+      return;
+    }
+
+    if (touchInButton(x, y, btnGraphMaxY)) {
+      guiState.keypadMode = KEYPAD_GRAPH_MAX_Y;
+      guiState.currentMode = MODE_KEYPAD;
+      sprintf(guiState.keypadBuffer, "%.2f",
+              graphSettings.all.axisRanges[graphSettings.all.dataType][1]);
+      guiState.keypadPos = strlen(guiState.keypadBuffer);
+      drawKeypadPanel();
+      return;
+    }
+
+    // Line thickness
+    if (touchInButton(x, y, btnGraphThickness)) {
+      graphSettings.all.lineThickness = (graphSettings.all.lineThickness % 3) + 1;
+      saveGraphSettings();
+      drawGraphSettingsPage();
+      return;
+    }
+
+    // Time range
+    if (touchInButton(x, y, btnGraphTimeRange)) {
+      guiState.keypadMode = KEYPAD_GRAPH_TIME_RANGE;
+      guiState.currentMode = MODE_KEYPAD;
+      sprintf(guiState.keypadBuffer, "%.2f", graphSettings.timeRange);
+      guiState.keypadPos = strlen(guiState.keypadBuffer);
+      drawKeypadPanel();
+      return;
+    }
+
+    // Device buttons instead of checkboxes
+    for (int i = 0; i < 6; i++) {
+      int buttonX = 30 + (i % 3) * 140;
+      int buttonY = 110 + (i / 3) * 40;
+
+      if (x >= buttonX && x <= buttonX + 120 && y >= buttonY && y <= buttonY + 30) {
+        toggleDeviceInAll(i);
+        drawGraphSettingsPage();
+        return;
+      }
+    }
+
+    // Auto scale checkbox - FIXED: Correct positioning
+    if (x >= 120 && x <= 145 && y >= 240 && y <= 265) {
+      graphSettings.autoFitEnabled = !graphSettings.autoFitEnabled;
+      saveGraphSettings();
+      drawGraphSettingsPage();
+      return;
+    }
+  } else {
+    // Individual device settings
+    int deviceIndex = (int)guiState.currentGraphTab - 1;
+
+    // Data type buttons
+    for (int i = 0; i < 3; i++) {
+      if (x >= 30 + i * 120 && x <= 130 + i * 120 && y >= 75 && y <= 105) {
+        toggleDeviceGraphDataType(deviceIndex, (GraphDataType)i);
+        drawGraphSettingsPage();
+        return;
+      }
+    }
+
+    // Color selection
+    for (int i = 0; i < 8; i++) {
+      int colorX = 30 + i * 50;
+      int colorY = 150;
+      if (x >= colorX && x <= colorX + 35 && y >= colorY && y <= colorY + 25) {
+        setDeviceGraphColor(deviceIndex, DEFAULT_GRAPH_COLORS[i]);
+        drawGraphSettingsPage();
+        return;
+      }
+    }
+
+    // Min/Max buttons
+    if (touchInButton(x, y, btnGraphMinY)) {
+      guiState.keypadMode = KEYPAD_GRAPH_MIN_Y;
+      guiState.currentMode = MODE_KEYPAD;
+      sprintf(guiState.keypadBuffer, "%.2f",
+              graphSettings.devices[deviceIndex].axisRanges[graphSettings.devices[deviceIndex].dataType][0]);
+      guiState.keypadPos = strlen(guiState.keypadBuffer);
+      drawKeypadPanel();
+      return;
+    }
+
+    if (touchInButton(x, y, btnGraphMaxY)) {
+      guiState.keypadMode = KEYPAD_GRAPH_MAX_Y;
+      guiState.currentMode = MODE_KEYPAD;
+      sprintf(guiState.keypadBuffer, "%.2f",
+              graphSettings.devices[deviceIndex].axisRanges[graphSettings.devices[deviceIndex].dataType][1]);
+      guiState.keypadPos = strlen(guiState.keypadBuffer);
+      drawKeypadPanel();
+      return;
+    }
+
+    // Auto scale checkbox - FIXED: Correct positioning
+    if (x >= 120 && x <= 145 && y >= 240 && y <= 265) {
+      graphSettings.autoFitEnabled = !graphSettings.autoFitEnabled;
+      saveGraphSettings();
+      drawGraphSettingsPage();
+      return;
+    }
+  }
+}
+
+void handleTouchGraphDisplaySettings(int16_t x, int16_t y) {
+  if (touchInButton(x, y, btnGraphDisplayBack)) {
+    guiState.currentMode = MODE_GRAPH_SETTINGS;
+    drawGraphSettingsPage();
+    return;
+  }
+
+  // Handle toggles and inputs
+  // Antialiasing toggle
+  if (x >= 180 && x <= 205 && y >= 45 && y <= 70) {
+    graphSettings.enableAntialiasing = !graphSettings.enableAntialiasing;
+    saveGraphSettings();
+    drawGraphDisplaySettingsPage();
+    return;
+  }
+
+  // Grids toggle
+  if (x >= 180 && x <= 205 && y >= 85 && y <= 110) {
+    graphSettings.showGrids = !graphSettings.showGrids;
+    saveGraphSettings();
+    drawGraphDisplaySettingsPage();
+    return;
+  }
+
+  // Max points input
+  if (x >= 180 && x <= 260 && y >= 125 && y <= 150) {
+    guiState.keypadMode = KEYPAD_GRAPH_MAX_POINTS;
+    guiState.currentMode = MODE_KEYPAD;
+    sprintf(guiState.keypadBuffer, "%d", graphSettings.effectiveMaxPoints);
+    guiState.keypadPos = strlen(guiState.keypadBuffer);
+    drawKeypadPanel();
+    return;
+  }
+
+  // Refresh rate input
+  if (x >= 180 && x <= 260 && y >= 165 && y <= 190) {
+    guiState.keypadMode = KEYPAD_GRAPH_REFRESH_RATE;
+    guiState.currentMode = MODE_KEYPAD;
+    sprintf(guiState.keypadBuffer, "%lu", graphSettings.graphRefreshRate);
+    guiState.keypadPos = strlen(guiState.keypadBuffer);
+    drawKeypadPanel();
+    return;
   }
 }
 
@@ -99,7 +362,7 @@ bool touchInButton(int16_t x, int16_t y, const ButtonRegion& btn) {
 void handleTouchMain(int16_t x, int16_t y) {
   ButtonRegion* buttons[] = {
     &btnRecord, &btnSDRefresh, &btnStop, &btnLock, &btnAllOn,
-    &btnAllOff, &btnScript, &btnEdit, &btnSettings
+    &btnAllOff, &btnScript, &btnEdit, &btnSettings, &btnGraph
   };
   int btnCount = sizeof(buttons) / sizeof(buttons[0]);
   int pressedIdx = -1;
@@ -193,6 +456,12 @@ void handleTouchMain(int16_t x, int16_t y) {
   else if (touchInButton(x, y, btnSettings)) {
     guiState.currentMode = MODE_SETTINGS;
     drawSettingsPanel();
+    return;
+  }
+  else if (touchInButton(x, y, btnGraph)) {
+    guiState.currentMode = MODE_GRAPH;
+    guiState.currentGraphTab = GRAPH_TAB_ALL;
+    drawGraphPage();
     return;
   }
 }
@@ -884,6 +1153,12 @@ void handleTouchKeypad(int16_t x, int16_t y) {
     } else if (guiState.keypadMode == KEYPAD_NETWORK_IP || guiState.keypadMode == KEYPAD_NETWORK_PORT || guiState.keypadMode == KEYPAD_NETWORK_TIMEOUT) {
       guiState.currentMode = MODE_NETWORK_EDIT;
       drawNetworkEditPanel();
+    } else if (guiState.keypadMode >= KEYPAD_GRAPH_MIN_Y && guiState.keypadMode <= KEYPAD_GRAPH_TIME_RANGE) {
+      guiState.currentMode = MODE_GRAPH_SETTINGS;
+      drawGraphSettingsPage();
+    } else if (guiState.keypadMode == KEYPAD_GRAPH_MAX_POINTS || guiState.keypadMode == KEYPAD_GRAPH_REFRESH_RATE) {
+      guiState.currentMode = MODE_GRAPH_DISPLAY;
+      drawGraphDisplaySettingsPage();
     } else {
       guiState.currentMode = MODE_EDIT;
       drawEditPage();

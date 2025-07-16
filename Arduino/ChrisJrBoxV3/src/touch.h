@@ -32,6 +32,9 @@ void handleTouchDateTime(int16_t x, int16_t y);
 void handleTouchEditName(int16_t x, int16_t y);
 void handleTouchDeleteConfirm(int16_t x, int16_t y);
 void handleTouchAbout(int16_t x, int16_t y);
+void handleTouchGraph(int16_t x, int16_t y);
+void handleTouchGraphSettings(int16_t x, int16_t y);
+void handleTouchGraphDisplaySettings(int16_t x, int16_t y);  // ADDED
 
 // Navigation
 void handleUniversalBackButton();

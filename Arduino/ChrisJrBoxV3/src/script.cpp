@@ -11,6 +11,7 @@
 #include "time_utils.h"
 #include <SD.h>
 #include <ArduinoJson.h>
+#include <graphs.h>
 
 // External references
 extern SystemState systemState;
@@ -112,6 +113,10 @@ void startScript() {
   isScriptPaused    = false;
   scriptEndedEarly  = false;
 
+  //Clear graph data when starting script to avoid time mismatch
+  clearGraphData();
+
+
   // Update script usage timestamp
   currentScript.lastUsed = now();
   char filename[64];
@@ -151,6 +156,9 @@ void resumeScript() {
 
 void stopScript(bool userEnded) {
   if (!isScriptRunning) return;
+
+  extern void onScriptEnd();
+  onScriptEnd();
 
   isScriptRunning = false;
   isScriptPaused = false;
@@ -223,11 +231,10 @@ void loadScriptFromFile(const char* scriptName) {
   char nameOnly[32];
   strncpy(nameOnly, scriptName, sizeof(nameOnly) - 1);
   nameOnly[sizeof(nameOnly) - 1] = '\0';
-  char* ext = strstr(nameOnly, ".json");
-  if (ext) *ext = '\0';
 
-  strncpy(currentScript.scriptName, nameOnly, sizeof(currentScript.scriptName) - 1);
-  currentScript.scriptName[sizeof(currentScript.scriptName) - 1] = '\0';
+  // Safely copy and null-terminate the script name
+  snprintf(currentScript.scriptName, sizeof(currentScript.scriptName), "%s", nameOnly);
+
   currentScript.useRecord = doc["useRecord"] | true;
   currentScript.tStart = doc["tStart"] | 0;
   currentScript.tEnd = doc["tEnd"] | 120;
