@@ -188,7 +188,7 @@ void updateLEDs(unsigned long currentMillis) {
   // Handle script execution lock LED blinking
   static unsigned long lastLockBlink = 0;
   if (isScriptRunning && !isScriptPaused) {
-    if (currentMillis - lastLockBlink >= 750) {
+    if (currentMillis - lastLockBlink >= 500) {
       lastLockBlink = currentMillis;
       lockLedState = !lockLedState;
       digitalWrite(LOCK_LED_PIN, lockLedState ? HIGH : LOW);

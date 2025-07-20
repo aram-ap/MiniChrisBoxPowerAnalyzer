@@ -1,6 +1,28 @@
 /**
  * @file types.h
  * @brief Type definitions and structures
+ * 
+ * MIT License
+ * 
+ * Copyright (c) 2025 Aram Aprahamian
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #ifndef TYPES_H
@@ -62,9 +84,16 @@ struct GraphSettings {
   int effectiveMaxPoints = GRAPH_MAX_POINTS;
   unsigned long graphRefreshRate = GRAPH_UPDATE_INTERVAL;
   bool enableAntialiasing = false;
+  bool enableInterpolation = false;
+  float interpolationSmoothness = 1.0f;
+  bool enableGaussianFilter = false;
+  float interpolationTension = 0.0f;
+  float interpolationCurveScale = 2.0f;
+  int interpolationSubdiv = 32;
   bool showGrids = true;
   float pausedMinTime = 0.0f;
   float pausedMaxTime = 0.0f;
+  uint32_t checksum;
 };
 
 // Network structures
@@ -93,10 +122,11 @@ struct StreamConfig {
 
 // GUI structures
 enum GUIMode {
-  MODE_MAIN, MODE_SETTINGS, MODE_NETWORK, MODE_NETWORK_EDIT, MODE_KEYPAD,
-  MODE_SCRIPT, MODE_SCRIPT_LOAD, MODE_EDIT, MODE_EDIT_LOAD, MODE_EDIT_SAVE,
-  MODE_EDIT_FIELD, MODE_DATE_TIME, MODE_EDIT_NAME, MODE_DELETE_CONFIRM, MODE_ABOUT,
-  MODE_GRAPH, MODE_GRAPH_SETTINGS, MODE_GRAPH_DISPLAY  // ADDED
+  MODE_MAIN, MODE_SETTINGS, MODE_NETWORK, MODE_NETWORK_EDIT,
+  MODE_SCRIPT, MODE_SCRIPT_LOAD, MODE_EDIT, MODE_EDIT_LOAD, MODE_EDIT_FIELD,
+  MODE_EDIT_SAVE, MODE_EDIT_NAME, MODE_DATE_TIME, MODE_KEYPAD,
+  MODE_DELETE_CONFIRM, MODE_ABOUT, MODE_GRAPH, MODE_GRAPH_SETTINGS, MODE_GRAPH_DISPLAY,
+  MODE_SNAKE
 };
 
 enum KeypadMode {
@@ -104,7 +134,8 @@ enum KeypadMode {
   KEYPAD_SCRIPT_TEND, KEYPAD_DEVICE_ON_TIME, KEYPAD_DEVICE_OFF_TIME,
   KEYPAD_SCRIPT_SEARCH, KEYPAD_SCRIPT_NAME, KEYPAD_NETWORK_IP,
   KEYPAD_NETWORK_PORT, KEYPAD_NETWORK_TIMEOUT, KEYPAD_GRAPH_MIN_Y, KEYPAD_GRAPH_MAX_Y,
-  KEYPAD_GRAPH_TIME_RANGE, KEYPAD_GRAPH_MAX_POINTS, KEYPAD_GRAPH_REFRESH_RATE  // ADDED
+  KEYPAD_GRAPH_TIME_RANGE, KEYPAD_GRAPH_MAX_POINTS, KEYPAD_GRAPH_REFRESH_RATE,
+  KEYPAD_GRAPH_INTERPOLATION_TENSION, KEYPAD_GRAPH_INTERPOLATION_CURVESCALE, KEYPAD_GRAPH_INTERPOLATION_SUBDIV
 };
 
 struct ButtonRegion {
@@ -169,6 +200,35 @@ struct NetworkEditField {
   bool isSelected;
 };
 
+// Snake game structures
+enum SnakeDirection {
+  SNAKE_UP = 0,
+  SNAKE_DOWN = 1,
+  SNAKE_LEFT = 2,
+  SNAKE_RIGHT = 3
+};
+
+struct SnakeSegment {
+  int x, y;
+};
+
+struct SnakeGame {
+  SnakeSegment segments[100];  // Maximum snake length
+  int length;
+  SnakeDirection direction;
+  SnakeDirection nextDirection;
+  int foodX, foodY;
+  int score;
+  bool gameRunning;
+  bool gamePaused;
+  bool gameOver;
+  bool pausedByBackButton;  // Track if paused by B button
+  bool newHighScore;  // Track if current game achieved new high score
+  unsigned long lastMoveTime;
+  unsigned long moveInterval;
+  int maxScore;
+};
+
 // System state
 struct SystemState {
   bool lock = false;
@@ -226,6 +286,11 @@ struct GUIState {
   char lastKey = '\0';
   unsigned long lastKeyTime = 0;
   int currentLetterIndex = 0;
+  // Secret sequence tracking for snake game
+  char secretSequence[4] = "";
+  int secretSequencePos = 0;
+  bool showSecretButton = false;
+  unsigned long lastSecretKeyTime = 0;
 };
 
 enum SortMode {

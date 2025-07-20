@@ -1,6 +1,28 @@
 /**
  * @file touch.cpp
  * @brief Touch screen handling implementation
+ * 
+ * MIT License
+ * 
+ * Copyright (c) 2025 Aram Aprahamian
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "touch.h"
@@ -16,6 +38,7 @@
 // extern ButtonRegion btnGraphDisplay;
 // extern ButtonRegion btnGraphDisplayBack;
 // extern ButtonRegion btnGraphDataTypeFooter;
+// extern ButtonRegion btnColorSettings;
 
 // Touch object
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
@@ -24,9 +47,11 @@ XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
 extern SystemState systemState;
 extern GUIState guiState;
 extern NetworkConfig networkConfig;
+extern SnakeGame snakeGame;
 
 // Constants
 const unsigned long touchDebounceMs = 200;
+const unsigned long touchMaxProcessingTime = 50; // Maximum time to spend processing touch
 
 void initTouch() {
   ts.begin();
@@ -36,11 +61,32 @@ void initTouch() {
 void handleTouch(unsigned long currentMillis) {
   if (ts.touched()) {
     if (currentMillis - systemState.lastTouchTime > touchDebounceMs) {
+      unsigned long touchStartTime = millis();
       TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, 200, 3800, 0, SCREEN_WIDTH);
+      
+      // IMPROVED: Better calibration with more accurate range and filtering
+      // Clamp raw touch values to expected range to prevent extreme mapping
+      int16_t raw_x = constrain(p.x, 150, 3900);
+      int16_t raw_y = constrain(p.y, 150, 3900);
+      
+      // ADDED: Additional validation to prevent invalid touch data
+      if (raw_x < 0 || raw_y < 0 || raw_x > 4095 || raw_y > 4095) {
+        return; // Skip invalid touch data
+      }
+      
+      int16_t x = map(raw_x, 150, 3900, 0, SCREEN_WIDTH);
       x = SCREEN_WIDTH - x;
-      int16_t y = map(p.y, 200, 3800, SCREEN_HEIGHT, 0);
+      int16_t y = map(raw_y, 150, 3900, SCREEN_HEIGHT, 0);
+      
+      // Constrain coordinates to valid screen bounds to prevent buffer overflow
+      x = constrain(x, 0, SCREEN_WIDTH - 1);
+      y = constrain(y, 0, SCREEN_HEIGHT - 1);
 
+      // ADDED: Timeout protection for touch processing
+      if (millis() - touchStartTime > touchMaxProcessingTime) {
+        return; // Skip processing if taking too long
+      }
+      
       // Route touch handling based on current mode
       switch(guiState.currentMode) {
         case MODE_MAIN:
@@ -93,10 +139,12 @@ void handleTouch(unsigned long currentMillis) {
         break;
         case MODE_GRAPH_SETTINGS:
           handleTouchGraphSettings(x, y);
+        break;
         case MODE_GRAPH_DISPLAY:
           handleTouchGraphDisplaySettings(x, y);
         break;
-
+        case MODE_SNAKE:
+          handleTouchSnake(x, y);
         break;
         default:
           break;
@@ -174,14 +222,19 @@ void handleTouchGraph(int16_t x, int16_t y) {
 }
 
 void handleTouchGraphSettings(int16_t x, int16_t y) {
+  // 1) If user clicked “Back”
   if (touchInButton(x, y, btnGraphSettingsBack)) {
+    guiState.isInGraphSettings = false;
+
+    // Force a graph page redraw
     guiState.currentMode = MODE_GRAPH;
     graphState.needsFullRedraw = true;
     drawGraphPage();
-    return;  // Ensure immediate return
+
+    return;
   }
 
-  // Handle display button
+  // 2) “Display” button → go to display settings
   if (touchInButton(x, y, btnGraphDisplay)) {
     guiState.currentMode = MODE_GRAPH_DISPLAY;
     drawGraphDisplaySettingsPage();
@@ -222,6 +275,7 @@ void handleTouchGraphSettings(int16_t x, int16_t y) {
     if (touchInButton(x, y, btnGraphThickness)) {
       graphSettings.all.lineThickness = (graphSettings.all.lineThickness % 3) + 1;
       saveGraphSettings();
+      graphState.needsFullRedraw = true;
       drawGraphSettingsPage();
       return;
     }
@@ -300,42 +354,59 @@ void handleTouchGraphSettings(int16_t x, int16_t y) {
       return;
     }
 
-    // Auto scale checkbox - FIXED: Correct positioning
+    // Auto scale checkbox
     if (x >= 120 && x <= 145 && y >= 240 && y <= 265) {
       graphSettings.autoFitEnabled = !graphSettings.autoFitEnabled;
       saveGraphSettings();
       drawGraphSettingsPage();
       return;
     }
+
+    // Time range
+    if (touchInButton(x, y, btnGraphTimeRange)) {
+      guiState.keypadMode = KEYPAD_GRAPH_TIME_RANGE;
+      guiState.currentMode = MODE_KEYPAD;
+      sprintf(guiState.keypadBuffer, "%.2f", graphSettings.timeRange);
+      guiState.keypadPos = strlen(guiState.keypadBuffer);
+      drawKeypadPanel();
+      return;
+    }
+
   }
 }
 
 void handleTouchGraphDisplaySettings(int16_t x, int16_t y) {
+  // Existing back button
   if (touchInButton(x, y, btnGraphDisplayBack)) {
     guiState.currentMode = MODE_GRAPH_SETTINGS;
     drawGraphSettingsPage();
     return;
   }
 
-  // Handle toggles and inputs
-  // Antialiasing toggle
+  int spacing = 30;  // Matches drawing compactness
+
+  // Existing toggles/inputs (compact y)
+  // Antialiasing (y=60-85)
   if (x >= 180 && x <= 205 && y >= 45 && y <= 70) {
     graphSettings.enableAntialiasing = !graphSettings.enableAntialiasing;
     saveGraphSettings();
+    graphSettings.autoFitEnabled = !graphSettings.autoFitEnabled;
+    graphState.needsFullRedraw = true;
     drawGraphDisplaySettingsPage();
     return;
   }
 
-  // Grids toggle
-  if (x >= 180 && x <= 205 && y >= 85 && y <= 110) {
+  // Show Grids (y=90-115)
+  if (x >= 180 && x <= 205 && y >= 75 && y <= 100) {
     graphSettings.showGrids = !graphSettings.showGrids;
     saveGraphSettings();
+    graphState.needsFullRedraw = true;
     drawGraphDisplaySettingsPage();
     return;
   }
 
-  // Max points input
-  if (x >= 180 && x <= 260 && y >= 125 && y <= 150) {
+  // Max Points (y=120-145)
+  if (x >= 180 && x <= 260 && y >= 105 && y <= 130) {
     guiState.keypadMode = KEYPAD_GRAPH_MAX_POINTS;
     guiState.currentMode = MODE_KEYPAD;
     sprintf(guiState.keypadBuffer, "%d", graphSettings.effectiveMaxPoints);
@@ -344,13 +415,60 @@ void handleTouchGraphDisplaySettings(int16_t x, int16_t y) {
     return;
   }
 
-  // Refresh rate input
-  if (x >= 180 && x <= 260 && y >= 165 && y <= 190) {
+  // Refresh Rate (y=150-175)
+  if (x >= 180 && x <= 260 && y >= 135 && y <= 160) {
     guiState.keypadMode = KEYPAD_GRAPH_REFRESH_RATE;
     guiState.currentMode = MODE_KEYPAD;
     sprintf(guiState.keypadBuffer, "%lu", graphSettings.graphRefreshRate);
     guiState.keypadPos = strlen(guiState.keypadBuffer);
     drawKeypadPanel();
+    return;
+  }
+
+  // NEW: Interpolation items (compact y, continued below)
+  // Interpolate Data (y=180-205)
+  if (x >= 180 && x <= 205 && y >= 165 && y <= 190) {
+    graphSettings.enableInterpolation = !graphSettings.enableInterpolation;
+    saveGraphSettings();
+    graphState.needsFullRedraw= true;
+    drawGraphDisplaySettingsPage();
+    return;
+  }
+
+  // Tension (y=210-235)
+  if (x >= 180 && x <= 260 && y >= 195 && y <= 220) {
+    guiState.keypadMode = KEYPAD_GRAPH_INTERPOLATION_TENSION;
+    guiState.currentMode = MODE_KEYPAD;
+    sprintf(guiState.keypadBuffer, "%.2f", graphSettings.interpolationTension);
+    guiState.keypadPos = strlen(guiState.keypadBuffer);
+    drawKeypadPanel();
+    return;
+  }
+
+  // Curve Scale (y=240-265)
+  if (x >= 180 && x <= 260 && y >= 225 && y <= 250) {
+    guiState.keypadMode = KEYPAD_GRAPH_INTERPOLATION_CURVESCALE;
+    guiState.currentMode = MODE_KEYPAD;
+    sprintf(guiState.keypadBuffer, "%.2f", graphSettings.interpolationCurveScale);
+    guiState.keypadPos = strlen(guiState.keypadBuffer);
+    drawKeypadPanel();
+    return;
+  }
+
+  // Subdiv (y=270-295)
+  if (x >= 180 && x <= 260 && y >= 255 && y <= 280) {
+    guiState.keypadMode = KEYPAD_GRAPH_INTERPOLATION_SUBDIV;
+    guiState.currentMode = MODE_KEYPAD;
+    sprintf(guiState.keypadBuffer, "%d", graphSettings.interpolationSubdiv);
+    guiState.keypadPos = strlen(guiState.keypadBuffer);
+    drawKeypadPanel();
+    return;
+  }
+
+  // Existing back button...
+  if (touchInButton(x, y, btnGraphDisplayBack)) {
+    guiState.currentMode = MODE_GRAPH_SETTINGS;
+    drawGraphSettingsPage();
     return;
   }
 }
@@ -470,6 +588,8 @@ void handleTouchSettings(int16_t x, int16_t y) {
   ButtonRegion* buttons[] = {
     &btnSettingsBack, &btnSettingsStop, &btnFanSpeedInput, &btnUpdateRateInput,
     &btnSetTimeDate, &btnTimeFormatToggle, &btnDarkModeToggle, &btnNetwork, &btnAbout
+    // Remove color settings button
+    // , &btnColorSettings
   };
   int btnCount = sizeof(buttons) / sizeof(buttons[0]);
 
@@ -547,6 +667,12 @@ void handleTouchSettings(int16_t x, int16_t y) {
         drawAboutPage();
         return;
       }
+      // Remove color settings button handling
+      // else if (btn == &btnColorSettings) {
+      //   guiState.currentMode = MODE_COLOR_SETTINGS;
+      //   drawColorSettingsPage();
+      //   return;
+      // }
 
       drawSettingsPanel();
       return;
@@ -1093,6 +1219,16 @@ void handleTouchAbout(int16_t x, int16_t y) {
     }
     return;
   }
+  
+  // Check for secret button touch (bottom right corner)
+  if (guiState.showSecretButton && x >= 380 && x <= 470 && y >= 280 && y <= 315) {
+    // Initialize and enter snake game
+    initSnakeGame();
+    guiState.previousMode = guiState.currentMode;
+    guiState.currentMode = MODE_SNAKE;
+    drawSnakeGame();
+    return;
+  }
 }
 
 void handleTouchDateTime(int16_t x, int16_t y) {
@@ -1207,7 +1343,34 @@ void handleUniversalBackButton() {
       guiState.currentMode = MODE_SETTINGS;
       drawSettingsPanel();
       break;
+    case MODE_SNAKE:
+      guiState.currentMode = MODE_ABOUT;
+      drawAboutPage();
+      break;
     default:
       break;
+  }
+}
+
+void handleTouchSnake(int16_t x, int16_t y) {
+  // Back button (top left)
+  if (x >= 5 && x <= 65 && y >= 5 && y <= 30) {
+    guiState.currentMode = MODE_ABOUT;
+    drawAboutPage();
+    return;
+  }
+  
+  // Pause button (top right) - only if game is running and not over
+  if (snakeGame.gameRunning && !snakeGame.gameOver && 
+      x >= 380 && x <= 470 && y >= 5 && y <= 30) {
+    snakeGame.gamePaused = !snakeGame.gamePaused;
+    if (!snakeGame.gamePaused) {
+      // Clear back button flag when unpausing via touch
+      snakeGame.pausedByBackButton = false;
+      clearGameStatusText();  // Clear pause text and redraw field
+    }
+    updatePauseButton();
+    updateGameStatusText();
+    return;
   }
 }

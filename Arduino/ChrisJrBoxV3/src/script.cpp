@@ -22,14 +22,14 @@ Script currentScript;
 bool isScriptRunning = false;
 bool isScriptPaused = false;
 long scriptTimeSeconds = 0;
-ScriptMetadata scriptList[MAX_SCRIPTS];
+DMAMEM ScriptMetadata scriptList[MAX_SCRIPTS];  // Move to RAM2 to free up 4KB of RAM1
 int numScripts = 0;
 SortMode currentSortMode = SORT_NAME;
 
-// Private script state
-static unsigned long scriptStartMillis = 0;
-static unsigned long scriptPausedTime = 0;
-static unsigned long pauseStartMillis = 0;
+// Script timing variables (made accessible for graph data collection)
+unsigned long scriptStartMillis = 0;
+unsigned long scriptPausedTime = 0;
+unsigned long pauseStartMillis = 0;
 static bool scriptEndedEarly = false;
 static bool lockStateBeforeScript = false;
 static bool deviceOnTriggered[6] = {false, false, false, false, false, false};
@@ -49,7 +49,7 @@ void handleScripts() {
   }
 
   unsigned long msSinceStart = millis() - scriptStartMillis - totalPausedTime;
-  long currentSecond = currentScript.tStart + (long)(msSinceStart / 1000);
+  long currentSecond = currentScript.tStart + (long)((msSinceStart + 500) / 1000); // Round to nearest second
   scriptTimeSeconds = currentSecond;
 
   // Check for script completion

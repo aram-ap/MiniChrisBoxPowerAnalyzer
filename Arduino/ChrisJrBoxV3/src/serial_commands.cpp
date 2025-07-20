@@ -1,6 +1,28 @@
 /**
  * @file serial_commands.cpp
  * @brief Serial command processing implementation
+ * 
+ * MIT License
+ * 
+ * Copyright (c) 2025 Aram Aprahamian
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "serial_commands.h"
@@ -11,7 +33,11 @@
 #include "datalog.h"
 #include "network.h"
 #include "display.h"
+#include "graphs.h"
+#include "settings.h"
+#include <InternalTemperature.h>
 #include <ArduinoJson.h>
+#include <EEPROM.h>
 
 using namespace qindesign::network;
 
@@ -20,6 +46,7 @@ extern SystemState systemState;
 extern GUIState guiState;
 extern NetworkConfig networkConfig;
 extern bool ethernetConnected;
+extern SnakeGame snakeGame;
 
 // Private variables
 static String serialBuffer = "";
@@ -100,6 +127,17 @@ void handleCommand(String command) {
     checkInternalSD();
     Serial.println("SD card status refreshed manually");
   }
+  else if (command == "get temp") {
+    Serial.print("Temperature: ");
+    Serial.print(InternalTemperature.readTemperatureC(), 1);
+
+    Serial.println("°C");
+  }
+  else if (command == "reset score") {
+    snakeGame.maxScore = 0;
+    EEPROM.put(EEPROM_SNAKE_MAX_SCORE_ADDR, snakeGame.maxScore);
+    Serial.println("Snake game high score reset to 0");
+  }
   else if (command.indexOf(" on") != -1) {
     String deviceName = command.substring(0, command.indexOf(" on"));
     setOutputState(deviceName, true);
@@ -107,6 +145,37 @@ void handleCommand(String command) {
   else if (command.indexOf(" off") != -1) {
     String deviceName = command.substring(0, command.indexOf(" off"));
     setOutputState(deviceName, false);
+  }
+  else if (command == "graph apply default") {
+    resetGraphSettings();
+    Serial.println("Graph settings reset to defaults");
+  }
+  else if (command == "main apply default") {
+    // Reset main system settings to defaults
+    systemState.fanOn = true;
+    systemState.fanSpeed = 255;
+    systemState.updateRate = 100;
+    systemState.use24HourFormat = true;
+    systemState.darkMode = true;
+    systemState.csvOutput = false;
+    systemState.csvHeaderWritten = false;
+    applyDarkMode();
+    applyFanSettings();
+    Serial.println("Main system settings reset to defaults");
+  }
+  else if (command == "apply default") {
+    // Reset both graph and main settings
+    resetGraphSettings();
+    systemState.fanOn = true;
+    systemState.fanSpeed = 255;
+    systemState.updateRate = 100;
+    systemState.use24HourFormat = true;
+    systemState.darkMode = true;
+    systemState.csvOutput = false;
+    systemState.csvHeaderWritten = false;
+    applyDarkMode();
+    applyFanSettings();
+    Serial.println("All settings reset to defaults");
   }
   else {
     Serial.println("Unknown command. Type 'help' for available commands.");
@@ -217,12 +286,19 @@ void printHelp() {
   Serial.println("  stop log     - Stop data logging");
   Serial.println("  refresh sd   - Manually refresh SD card status");
   Serial.println();
+  Serial.println("Settings Reset:");
+  Serial.println("  graph apply default - Reset graph settings to defaults");
+  Serial.println("  main apply default  - Reset main system settings to defaults");
+  Serial.println("  apply default       - Reset all settings to defaults");
+  Serial.println();
   Serial.println("Output Format:");
   Serial.println("  csv on       - Enable CSV output format");
   Serial.println("  csv off      - Enable human readable format");
   Serial.println();
   Serial.println("Information:");
   Serial.println("  status       - Show current system status");
+  Serial.println("  get temp     - Show internal temperature");
+  Serial.println("  reset score  - Reset snake game high score");
   Serial.println("  help         - Show this help message");
   Serial.println();
   Serial.println("Network Commands (JSON format):");

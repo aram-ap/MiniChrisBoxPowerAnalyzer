@@ -1,6 +1,28 @@
 /**
  * @file config.h
  * @brief System configuration and constants
+ * 
+ * MIT License
+ * 
+ * Copyright (c) 2025 Aram Aprahamian
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #ifndef CONFIG_H
@@ -56,6 +78,19 @@ const int SCREEN_HEIGHT = 320;
 #define MAIN_BUTTON_COLUMN_X 375
 #define MAIN_BUTTON_COLUMN_WIDTH 100
 
+#define COLOR_BACKGROUND 0x0000
+#define COLOR_LIGHT_BACKGROUND 0x8410
+#define COLOR_PRIMARY_TEXT 0xFFFF
+#define COLOR_SECONDARY_TEXT 0xC618
+#define COLOR_PRIMARY_TEXT_DARK 0x3186
+#define COLOR_SECONDARY_TEXT_DARK 0x8410
+#define COLOR_PRIMARY 0xFFE0
+#define COLOR_DISABLED 0x3186
+#define COLOR_SECONDARY 0x780F
+#define COLOR_TERTIARY 0x07FF
+#define COLOR_QUATERNARY 0xF81F
+#define COLOR_ALARM 0xF81F
+
 // Color definitions
 #define COLOR_BLACK     0x0000
 #define COLOR_WHITE     0xFFFF
@@ -66,7 +101,9 @@ const int SCREEN_HEIGHT = 320;
 #define COLOR_BTN_PRESS 0x3186
 #define COLOR_RECORD    0x001F
 #define COLOR_RECORDING 0xF800
+#define COLOR_GRAY_DARK  0x3186
 #define COLOR_GRAY      0x8410
+#define COLOR_GRAY_LIGHT 0xC618
 #define COLOR_RED       0xF800
 #define COLOR_GREEN     0x07E0
 #define COLOR_CYAN      0x07FF
@@ -100,5 +137,6 @@ extern const char* T9_LETTERS[];  // Declare as extern to avoid redefinition
 #define EEPROM_NETWORK_CONFIG_ADDR 28
 #define EEPROM_SORT_MODE_ADDR  60
 #define EEPROM_GRAPH_SETTINGS_ADDR 64  // New address for graph settings
+#define EEPROM_SNAKE_MAX_SCORE_ADDR 500  // Snake game max score
 
 #endif // CONFIG_H

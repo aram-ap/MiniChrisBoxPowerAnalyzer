@@ -11,6 +11,7 @@
 #include "time_utils.h"
 #include "display.h"
 #include <ArduinoJson.h>
+#include <rgb565_colors.h>
 
 // External references
 extern SystemState systemState;
@@ -73,7 +74,7 @@ void smartCheckSDCard() {
                btnRecord.enabled);
 
     drawButton(btnSDRefresh,
-               systemState.sdAvailable ? COLOR_GREEN : COLOR_RED,
+               systemState.sdAvailable ? RGB565_Apple_green: COLOR_RED,
                COLOR_WHITE,
                "SD",
                false,
