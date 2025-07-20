@@ -217,6 +217,11 @@ struct SnakeGame {
   int length;
   SnakeDirection direction;
   SnakeDirection nextDirection;
+  // Input buffer for enhanced controls - allows multiple direction inputs to be queued
+  SnakeDirection inputBuffer[4];  // Buffer for up to 4 direction changes
+  int inputBufferHead;  // Index where next input will be stored
+  int inputBufferTail;  // Index where next input will be read
+  int inputBufferSize;  // Number of buffered inputs
   int foodX, foodY;
   int score;
   bool gameRunning;

@@ -76,6 +76,7 @@ void clearGameStatusText();
 void redrawPlayingField();
 void flashGameOverLEDs();
 void flashHighScoreLEDs();
+void clearSnakeInputBuffer();
 
 // Element drawing functions
 void drawButton(ButtonRegion& btn, uint16_t bgColor, uint16_t textColor,

@@ -25,7 +25,7 @@ Keypad keypad = Keypad(makeKeymap(KEYPAD_KEYS), ROW_PINS, COL_PINS, 4, 4);
 // Custom keypad debouncing for snake game
 static char lastKeyPressed = NO_KEY;
 static unsigned long lastKeyTime = 0;
-static unsigned long snakeKeyDebounceTime = 100;  // 100ms for snake game
+static unsigned long snakeKeyDebounceTime = 50;  // 50ms for snake game
 static unsigned long normalKeyDebounceTime = 200; // Normal debounce time
 
 // External references
@@ -711,22 +711,87 @@ void handleSnakeGameInput(char key) {
   switch (key) {
     case '2':  // Up
       if (snakeGame.direction != SNAKE_DOWN) {
-        snakeGame.nextDirection = SNAKE_UP;
+        // Add to input buffer instead of directly setting nextDirection
+        if (snakeGame.inputBufferSize < 4) {
+          // Check if this direction is different from the last buffered direction
+          SnakeDirection lastBufferedDirection;
+          if (snakeGame.inputBufferSize > 0) {
+            // Get the last buffered direction (previous position in circular buffer)
+            int lastIndex = (snakeGame.inputBufferHead - 1 + 4) % 4;
+            lastBufferedDirection = snakeGame.inputBuffer[lastIndex];
+          } else {
+            lastBufferedDirection = snakeGame.direction;
+          }
+          
+          if (SNAKE_UP != lastBufferedDirection) {
+            snakeGame.inputBuffer[snakeGame.inputBufferHead] = SNAKE_UP;
+            snakeGame.inputBufferHead = (snakeGame.inputBufferHead + 1) % 4;
+            snakeGame.inputBufferSize++;
+          }
+        }
       }
       break;
     case '8':  // Down
       if (snakeGame.direction != SNAKE_UP) {
-        snakeGame.nextDirection = SNAKE_DOWN;
+        if (snakeGame.inputBufferSize < 4) {
+          // Check if this direction is different from the last buffered direction
+          SnakeDirection lastBufferedDirection;
+          if (snakeGame.inputBufferSize > 0) {
+            // Get the last buffered direction (previous position in circular buffer)
+            int lastIndex = (snakeGame.inputBufferHead - 1 + 4) % 4;
+            lastBufferedDirection = snakeGame.inputBuffer[lastIndex];
+          } else {
+            lastBufferedDirection = snakeGame.direction;
+          }
+          
+          if (SNAKE_DOWN != lastBufferedDirection) {
+            snakeGame.inputBuffer[snakeGame.inputBufferHead] = SNAKE_DOWN;
+            snakeGame.inputBufferHead = (snakeGame.inputBufferHead + 1) % 4;
+            snakeGame.inputBufferSize++;
+          }
+        }
       }
       break;
     case '4':  // Left
       if (snakeGame.direction != SNAKE_RIGHT) {
-        snakeGame.nextDirection = SNAKE_LEFT;
+        if (snakeGame.inputBufferSize < 4) {
+          // Check if this direction is different from the last buffered direction
+          SnakeDirection lastBufferedDirection;
+          if (snakeGame.inputBufferSize > 0) {
+            // Get the last buffered direction (previous position in circular buffer)
+            int lastIndex = (snakeGame.inputBufferHead - 1 + 4) % 4;
+            lastBufferedDirection = snakeGame.inputBuffer[lastIndex];
+          } else {
+            lastBufferedDirection = snakeGame.direction;
+          }
+          
+          if (SNAKE_LEFT != lastBufferedDirection) {
+            snakeGame.inputBuffer[snakeGame.inputBufferHead] = SNAKE_LEFT;
+            snakeGame.inputBufferHead = (snakeGame.inputBufferHead + 1) % 4;
+            snakeGame.inputBufferSize++;
+          }
+        }
       }
       break;
     case '6':  // Right
       if (snakeGame.direction != SNAKE_LEFT) {
-        snakeGame.nextDirection = SNAKE_RIGHT;
+        if (snakeGame.inputBufferSize < 4) {
+          // Check if this direction is different from the last buffered direction
+          SnakeDirection lastBufferedDirection;
+          if (snakeGame.inputBufferSize > 0) {
+            // Get the last buffered direction (previous position in circular buffer)
+            int lastIndex = (snakeGame.inputBufferHead - 1 + 4) % 4;
+            lastBufferedDirection = snakeGame.inputBuffer[lastIndex];
+          } else {
+            lastBufferedDirection = snakeGame.direction;
+          }
+          
+          if (SNAKE_RIGHT != lastBufferedDirection) {
+            snakeGame.inputBuffer[snakeGame.inputBufferHead] = SNAKE_RIGHT;
+            snakeGame.inputBufferHead = (snakeGame.inputBufferHead + 1) % 4;
+            snakeGame.inputBufferSize++;
+          }
+        }
       }
       break;
     case 'A':  // Start/Pause/Restart
@@ -735,6 +800,7 @@ void handleSnakeGameInput(char key) {
         clearGameStatusText();  // Clear text and redraw field before starting
         drawSnakeGameField();   // Redraw grid specifically when starting/restarting
         initSnakeGame();
+        clearSnakeInputBuffer();  // Clear input buffer for clean start
         snakeGame.gameRunning = true;
         snakeGame.gamePaused = false;
         snakeGame.gameOver = false;

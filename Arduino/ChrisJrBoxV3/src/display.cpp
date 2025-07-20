@@ -1481,11 +1481,20 @@ int* getNumNetworkFields() {
 // SNAKE GAME IMPLEMENTATION
 // ============================================================================
 
-#define SNAKE_GRID_SIZE 10
+#define SNAKE_GRID_SIZE 12
 #define SNAKE_GRID_WIDTH (SCREEN_WIDTH / SNAKE_GRID_SIZE)
 #define SNAKE_GRID_HEIGHT (SCREEN_HEIGHT / SNAKE_GRID_SIZE)
 #define SNAKE_INITIAL_SPEED 300
 #define SNAKE_DARK_GRAY 0x2104  // Very dark gray for checkerboard
+
+// Grid positioning and border calculations
+#define SNAKE_GRID_CELLS_X 39  // Number of grid cells horizontally (excluding borders)
+#define SNAKE_GRID_CELLS_Y 23  // Number of grid cells vertically (excluding borders)
+#define SNAKE_GRID_START_X ((SCREEN_WIDTH - (SNAKE_GRID_CELLS_X * SNAKE_GRID_SIZE)) / 2)  // Center the grid horizontally
+#define SNAKE_GRID_START_Y 35  // Start below UI elements
+#define SNAKE_GRID_END_X (SNAKE_GRID_START_X + (SNAKE_GRID_CELLS_X * SNAKE_GRID_SIZE))
+#define SNAKE_GRID_END_Y (SNAKE_GRID_START_Y + (SNAKE_GRID_CELLS_Y * SNAKE_GRID_SIZE))
+#define SNAKE_BORDER_WIDTH 2   // Border thickness
 
 void initSnakeGame() {
   // Load max score from EEPROM
@@ -1494,14 +1503,20 @@ void initSnakeGame() {
     snakeGame.maxScore = 0;
   }
   
-  // Initialize snake in center
+  // Initialize snake in center of playable area
   snakeGame.length = 3;
-  snakeGame.segments[0] = {SNAKE_GRID_WIDTH / 2, SNAKE_GRID_HEIGHT / 2};
-  snakeGame.segments[1] = {SNAKE_GRID_WIDTH / 2, SNAKE_GRID_HEIGHT / 2 + 1};
-  snakeGame.segments[2] = {SNAKE_GRID_WIDTH / 2, SNAKE_GRID_HEIGHT / 2 + 2};
+  snakeGame.segments[0] = {SNAKE_GRID_CELLS_X / 2, SNAKE_GRID_CELLS_Y / 2};
+  snakeGame.segments[1] = {SNAKE_GRID_CELLS_X / 2, SNAKE_GRID_CELLS_Y / 2 + 1};
+  snakeGame.segments[2] = {SNAKE_GRID_CELLS_X / 2, SNAKE_GRID_CELLS_Y / 2 + 2};
   
   snakeGame.direction = SNAKE_UP;
   snakeGame.nextDirection = SNAKE_UP;
+  
+  // Initialize input buffer for enhanced controls
+  snakeGame.inputBufferHead = 0;
+  snakeGame.inputBufferTail = 0;
+  snakeGame.inputBufferSize = 0;
+  
   snakeGame.score = 0;
   snakeGame.gameRunning = false;
   snakeGame.gamePaused = false;
@@ -1515,11 +1530,18 @@ void initSnakeGame() {
   placeSnakeFood();
 }
 
+// Helper function to clear input buffer
+void clearSnakeInputBuffer() {
+  snakeGame.inputBufferHead = 0;
+  snakeGame.inputBufferTail = 0;
+  snakeGame.inputBufferSize = 0;
+}
+
 void placeSnakeFood() {
   bool validPosition = false;
   while (!validPosition) {
-    snakeGame.foodX = random(2, SNAKE_GRID_WIDTH - 2);
-    snakeGame.foodY = random(5, SNAKE_GRID_HEIGHT - 2);
+    snakeGame.foodX = random(0, SNAKE_GRID_CELLS_X);
+    snakeGame.foodY = random(0, SNAKE_GRID_CELLS_Y);
     
     // Check if food position conflicts with snake
     validPosition = true;
@@ -1542,6 +1564,13 @@ void updateSnakeGame() {
   if (currentTime - snakeGame.lastMoveTime >= snakeGame.moveInterval) {
     snakeGame.lastMoveTime = currentTime;
     
+    // Read next direction from input buffer if available
+    if (snakeGame.inputBufferSize > 0) {
+      snakeGame.nextDirection = snakeGame.inputBuffer[snakeGame.inputBufferTail];
+      snakeGame.inputBufferTail = (snakeGame.inputBufferTail + 1) % 4;
+      snakeGame.inputBufferSize--;
+    }
+    
     // Update direction
     snakeGame.direction = snakeGame.nextDirection;
     
@@ -1562,9 +1591,9 @@ void updateSnakeGame() {
         break;
     }
     
-    // Check wall collision
-    if (newHead.x < 1 || newHead.x >= SNAKE_GRID_WIDTH - 1 ||
-        newHead.y < 4 || newHead.y >= SNAKE_GRID_HEIGHT - 1) {
+    // Check wall collision (now using grid cell boundaries)
+    if (newHead.x < 0 || newHead.x >= SNAKE_GRID_CELLS_X ||
+        newHead.y < 0 || newHead.y >= SNAKE_GRID_CELLS_Y) {
       snakeGame.gameOver = true;
       drawSnakeGameUI(); // Update UI to show game over
       // Trigger LED effects
@@ -1702,20 +1731,24 @@ void drawSnakeGameUI() {
 
 void drawSnakeGameField() {
   // Clear game area (avoid UI elements)
-  tft.fillRect(10, 35, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 45, RGB565_Black);
+  tft.fillRect(SNAKE_GRID_START_X - SNAKE_BORDER_WIDTH, SNAKE_GRID_START_Y - SNAKE_BORDER_WIDTH, 
+               SNAKE_GRID_CELLS_X * SNAKE_GRID_SIZE + 2 * SNAKE_BORDER_WIDTH, 
+               SNAKE_GRID_CELLS_Y * SNAKE_GRID_SIZE + 2 * SNAKE_BORDER_WIDTH, RGB565_Black);
   
   // Draw checkerboard pattern - aligned with border
-  for (int gridY = 4; gridY < SNAKE_GRID_HEIGHT - 1; gridY++) {
-    for (int gridX = 1; gridX < SNAKE_GRID_WIDTH - 1; gridX++) {
+  for (int gridY = 0; gridY < SNAKE_GRID_CELLS_Y; gridY++) {
+    for (int gridX = 0; gridX < SNAKE_GRID_CELLS_X; gridX++) {
       uint16_t color = ((gridX + gridY) % 2 == 0) ? RGB565_Black : SNAKE_DARK_GRAY;
-      int x = 10 + (gridX - 1) * SNAKE_GRID_SIZE;  // Align with border at x=10
-      int y = 35 + (gridY - 4) * SNAKE_GRID_SIZE;  // Align with border at y=35
+      int x = SNAKE_GRID_START_X + gridX * SNAKE_GRID_SIZE;
+      int y = SNAKE_GRID_START_Y + gridY * SNAKE_GRID_SIZE;
       tft.fillRect(x, y, SNAKE_GRID_SIZE, SNAKE_GRID_SIZE, color);
     }
   }
   
-  // Draw game border
-  tft.drawRect(9, 34, SCREEN_WIDTH - 18, SCREEN_HEIGHT - 44, RGB565_Gray_web);
+  // Draw game border - now sized based on grid
+  tft.drawRect(SNAKE_GRID_START_X - SNAKE_BORDER_WIDTH, SNAKE_GRID_START_Y - SNAKE_BORDER_WIDTH,
+               SNAKE_GRID_CELLS_X * SNAKE_GRID_SIZE + 2 * SNAKE_BORDER_WIDTH,
+               SNAKE_GRID_CELLS_Y * SNAKE_GRID_SIZE + 2 * SNAKE_BORDER_WIDTH, RGB565_Gray_web);
   
   // Draw snake if game is running
   if (snakeGame.gameRunning && !snakeGame.gamePaused) {
@@ -1774,13 +1807,13 @@ void flashHighScoreLEDs() {
 
 void clearSnakeSegment(int gridX, int gridY) {
   // Bounds check to prevent clearing outside valid game area
-  if (gridX < 1 || gridX >= SNAKE_GRID_WIDTH - 1 || 
-      gridY < 4 || gridY >= SNAKE_GRID_HEIGHT - 1) {
+  if (gridX < 0 || gridX >= SNAKE_GRID_CELLS_X || 
+      gridY < 0 || gridY >= SNAKE_GRID_CELLS_Y) {
     return;  // Don't clear if outside valid bounds
   }
   
-  int x = 10 + (gridX - 1) * SNAKE_GRID_SIZE;  // Align with border
-  int y = 35 + (gridY - 4) * SNAKE_GRID_SIZE;  // Align with border
+  int x = SNAKE_GRID_START_X + gridX * SNAKE_GRID_SIZE;
+  int y = SNAKE_GRID_START_Y + gridY * SNAKE_GRID_SIZE;
   // Restore checkerboard pattern
   uint16_t color = ((gridX + gridY) % 2 == 0) ? RGB565_Black : SNAKE_DARK_GRAY;
   tft.fillRect(x, y, SNAKE_GRID_SIZE - 1, SNAKE_GRID_SIZE - 1, color);
@@ -1788,13 +1821,13 @@ void clearSnakeSegment(int gridX, int gridY) {
 
 void drawSnakeSegment(int gridX, int gridY, uint16_t color) {
   // Bounds check to prevent drawing outside valid game area
-  if (gridX < 1 || gridX >= SNAKE_GRID_WIDTH - 1 || 
-      gridY < 4 || gridY >= SNAKE_GRID_HEIGHT - 1) {
+  if (gridX < 0 || gridX >= SNAKE_GRID_CELLS_X || 
+      gridY < 0 || gridY >= SNAKE_GRID_CELLS_Y) {
     return;  // Don't draw if outside valid bounds
   }
   
-  int x = 10 + (gridX - 1) * SNAKE_GRID_SIZE;  // Align with border
-  int y = 35 + (gridY - 4) * SNAKE_GRID_SIZE;  // Align with border
+  int x = SNAKE_GRID_START_X + gridX * SNAKE_GRID_SIZE;
+  int y = SNAKE_GRID_START_Y + gridY * SNAKE_GRID_SIZE;
   tft.fillRect(x, y, SNAKE_GRID_SIZE - 1, SNAKE_GRID_SIZE - 1, color);
 }
 
@@ -1843,20 +1876,24 @@ void clearGameStatusText() {
 void redrawPlayingField() {
   // Only redraw the central playing area, avoid UI elements
   // Clear the center area first
-  tft.fillRect(10, 35, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 45, RGB565_Black);
+  tft.fillRect(SNAKE_GRID_START_X - SNAKE_BORDER_WIDTH, SNAKE_GRID_START_Y - SNAKE_BORDER_WIDTH,
+               SNAKE_GRID_CELLS_X * SNAKE_GRID_SIZE + 2 * SNAKE_BORDER_WIDTH,
+               SNAKE_GRID_CELLS_Y * SNAKE_GRID_SIZE + 2 * SNAKE_BORDER_WIDTH, RGB565_Black);
   
   // Draw checkerboard pattern - aligned with border
-  for (int gridY = 4; gridY < SNAKE_GRID_HEIGHT - 1; gridY++) {
-    for (int gridX = 1; gridX < SNAKE_GRID_WIDTH - 1; gridX++) {
+  for (int gridY = 0; gridY < SNAKE_GRID_CELLS_Y; gridY++) {
+    for (int gridX = 0; gridX < SNAKE_GRID_CELLS_X; gridX++) {
       uint16_t color = ((gridX + gridY) % 2 == 0) ? RGB565_Black : SNAKE_DARK_GRAY;
-      int x = 10 + (gridX - 1) * SNAKE_GRID_SIZE;  // Align with border at x=10
-      int y = 35 + (gridY - 4) * SNAKE_GRID_SIZE;  // Align with border at y=35
+      int x = SNAKE_GRID_START_X + gridX * SNAKE_GRID_SIZE;
+      int y = SNAKE_GRID_START_Y + gridY * SNAKE_GRID_SIZE;
       tft.fillRect(x, y, SNAKE_GRID_SIZE, SNAKE_GRID_SIZE, color);
     }
   }
   
   // Draw game border
-  tft.drawRect(9, 34, SCREEN_WIDTH - 18, SCREEN_HEIGHT - 44, RGB565_Gray_web);
+  tft.drawRect(SNAKE_GRID_START_X - SNAKE_BORDER_WIDTH, SNAKE_GRID_START_Y - SNAKE_BORDER_WIDTH,
+               SNAKE_GRID_CELLS_X * SNAKE_GRID_SIZE + 2 * SNAKE_BORDER_WIDTH,
+               SNAKE_GRID_CELLS_Y * SNAKE_GRID_SIZE + 2 * SNAKE_BORDER_WIDTH, RGB565_Gray_web);
   
   // Redraw snake if game is running
   if (snakeGame.gameRunning && !snakeGame.gameOver) {
