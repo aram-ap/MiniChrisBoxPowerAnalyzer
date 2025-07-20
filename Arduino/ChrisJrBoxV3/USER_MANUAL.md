@@ -1040,6 +1040,18 @@ Physical keypad provides backup control when touchscreen is unavailable.
 
 ---
 
+## *Secret*
+
+There’s something special hidden within your power analyzer for those who enjoy a bit of exploration.
+
+Hint: Hidden secrets are often unlocked by simple sequences. Visit __Settings → About__ and carefully experiment with your keypad. A certain numeric progression combined with one letter will reveal a secret button, unlocking a timeless arcade game.
+
+How to unlock: Begin your search with simplicity—perhaps counting upward and then choosing the first letter available. Watch closely; the secret button is subtle and appears only when the right keys are pressed.
+
+Note: This hidden feature is just for fun and doesn’t affect the main functionality of your device.
+
+---
+
 ## Appendix
 
 ### Device Specifications

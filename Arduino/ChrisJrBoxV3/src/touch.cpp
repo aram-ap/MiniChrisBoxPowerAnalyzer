@@ -82,6 +82,19 @@ void handleTouch(unsigned long currentMillis) {
       x = constrain(x, 0, SCREEN_WIDTH - 1);
       y = constrain(y, 0, SCREEN_HEIGHT - 1);
 
+      // Optional debug output for touch calibration verification
+      #ifdef TOUCH_DEBUG
+      Serial.print("Touch: raw(");
+      Serial.print(p.x);
+      Serial.print(",");
+      Serial.print(p.y);
+      Serial.print(") -> screen(");
+      Serial.print(x);
+      Serial.print(",");
+      Serial.print(y);
+      Serial.println(")");
+      #endif
+
       // ADDED: Timeout protection for touch processing
       if (millis() - touchStartTime > touchMaxProcessingTime) {
         return; // Skip processing if taking too long
@@ -651,6 +664,8 @@ void handleTouchSettings(int16_t x, int16_t y) {
         return;
       }
       else if (btn == &btnDarkModeToggle) {
+        drawButton(btnDarkModeToggle, COLOR_BTN_PRESS, COLOR_WHITE, btnDarkModeToggle.label, true, btnDarkModeToggle.enabled);
+        delay(150);
         systemState.darkMode = !systemState.darkMode;
         saveSettingsToEEPROM();
         applyDarkMode();
